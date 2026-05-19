@@ -1,15 +1,17 @@
 import React, {useState} from 'react';
 import Dashboard from './pages/Dashboard';
 import EngineControl from './pages/EngineControl';
+import VehicleSelection from './pages/VehicleSelection';
 import Pairing from './pages/Pairing';
 import Clients from './pages/Clients';
 import Settings from './pages/Settings';
 import {getAdminToken, setAdminToken} from './api/bridgeClient';
 
-type PageKey = 'dashboard' | 'engine' | 'pairing' | 'clients' | 'settings';
+type PageKey = 'dashboard' | 'vehicle-selection' | 'engine' | 'pairing' | 'clients' | 'settings';
 
 const pages: Array<{ key: PageKey; label: string; description: string }> = [
     {key: 'dashboard', label: 'Dashboard', description: 'Bridge, Agent, Autocom status'},
+    {key: 'vehicle-selection', label: 'Vehicle Selection', description: 'Brands, models, years, variants'},
     {key: 'engine', label: 'Engine Control', description: 'Screen dump, Generic OBD, VCI, SignalR'},
     {key: 'pairing', label: 'Pairing', description: 'Device identity and QR pairing'},
     {key: 'clients', label: 'Clients', description: 'Paired devices and revoke access'},
@@ -111,6 +113,8 @@ function renderPage(page: PageKey) {
     switch (page) {
         case 'dashboard':
             return <Dashboard/>;
+        case 'vehicle-selection':
+            return <VehicleSelection/>;
         case 'engine':
             return <EngineControl/>;
         case 'pairing':

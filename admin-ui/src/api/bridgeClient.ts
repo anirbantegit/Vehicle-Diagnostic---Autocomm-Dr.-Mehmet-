@@ -62,6 +62,39 @@ export type RunDiagnosisPayload = {
     data?: unknown;
 };
 
+export type VehicleListType =
+    | 'brands'
+    | 'models'
+    | 'years'
+    | 'systemTypes'
+    | 'engines'
+    | 'systems'
+    | 'gearboxes'
+    | 'equipments';
+
+export type VehicleSelectionPayload = {
+    list_type: VehicleListType;
+    vehicle_id?: string;
+};
+
+export type VehicleSelectionItem = {
+    id: string;
+    name?: string;
+    title?: string;
+    icon?: string;
+    favourite?: boolean;
+    starred?: boolean;
+    [key: string]: unknown;
+};
+
+export type VehicleSelectionResponse = {
+    currentTitle?: string;
+    type?: string;
+    demoMode?: boolean;
+    items?: VehicleSelectionItem[];
+    [key: string]: unknown;
+};
+
 export function getAdminToken(): string {
     return localStorage.getItem(ADMIN_TOKEN_STORAGE_KEY) || '';
 }
@@ -146,6 +179,90 @@ export function getAgentStatus(): Promise<unknown> {
 export function getAutocomProduct(): Promise<unknown> {
     return bridgeRequest<unknown>('/bridge/autocom/product');
 }
+
+export function getVehicleSelection(
+    listType: VehicleListType,
+    vehicleId = '',
+): Promise<VehicleSelectionResponse> {
+    const cleanVehicleId = vehicleId.trim();
+    const path = cleanVehicleId
+        ? `/bridge/vehicles/${listType}/${encodeURIComponent(cleanVehicleId)}`
+        : `/bridge/vehicles/${listType}`;
+
+    return bridgeRequest<VehicleSelectionResponse>(path);
+}
+
+export function postVehicleSelection(
+    payload: VehicleSelectionPayload,
+): Promise<VehicleSelectionResponse> {
+    return bridgeRequest<VehicleSelectionResponse>('/bridge/vehicles/select', {
+        method: 'POST',
+        body: JSON.stringify({
+            list_type: payload.list_type,
+            vehicle_id: payload.vehicle_id || '',
+        }),
+    });
+}
+
+export function addVehicleFavourite(id: string): Promise<unknown> {
+    return bridgeRequest<unknown>('/bridge/vehicles/favourites/add', {
+        method: 'POST',
+        body: JSON.stringify({id}),
+    });
+}
+
+export function removeVehicleFavourite(id: string): Promise<unknown> {
+    return bridgeRequest<unknown>('/bridge/vehicles/favourites/remove', {
+        method: 'POST',
+        body: JSON.stringify({id}),
+    });
+}
+
+export function getVehicleGuide(vehicleDefinitionId: string): Promise<unknown> {
+    return bridgeRequest<unknown>(
+        `/bridge/vehicles/${encodeURIComponent(vehicleDefinitionId)}/guide`,
+    );
+}
+
+export function getVehicleCapabilities(
+    vehicleDefinitionId: string,
+    protocol = '',
+): Promise<unknown> {
+    const query = protocol.trim()
+        ? `?protocol=${encodeURIComponent(protocol.trim())}`
+        : '';
+
+    return bridgeRequest<unknown>(
+        `/bridge/vehicles/${encodeURIComponent(vehicleDefinitionId)}/capabilities${query}`,
+    );
+}
+
+export function getVehicleObdFunctions(
+    vehicleDefinitionId: string,
+    protocol = '',
+): Promise<unknown> {
+    const query = protocol.trim()
+        ? `?protocol=${encodeURIComponent(protocol.trim())}`
+        : '';
+
+    return bridgeRequest<unknown>(
+        `/bridge/vehicles/${encodeURIComponent(vehicleDefinitionId)}/obd-functions${query}`,
+    );
+}
+
+export function getVehicleRtdFunctions(
+    vehicleDefinitionId: string,
+    protocol = '',
+): Promise<unknown> {
+    const query = protocol.trim()
+        ? `?protocol=${encodeURIComponent(protocol.trim())}`
+        : '';
+
+    return bridgeRequest<unknown>(
+        `/bridge/vehicles/${encodeURIComponent(vehicleDefinitionId)}/rtd-functions${query}`,
+    );
+}
+
 
 export function getScreenTexts(): Promise<unknown> {
     return bridgeRequest<unknown>('/bridge/screen/texts');
