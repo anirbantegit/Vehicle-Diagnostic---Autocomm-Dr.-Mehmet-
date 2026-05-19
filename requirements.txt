@@ -1,0 +1,8 @@
+pywinauto==0.6.9
+pywin32==311
+pillow==12.2.0
+fastapi
+uvicorn[standard]
+requests
+websocket-client
+python-dotenv

@@ -1,0 +1,1 @@
+from app.bridge.main import app
