@@ -80,6 +80,13 @@ class Settings:
     def clients_file(self) -> Path:
         return self.data_dir / "clients.json"
 
+    @property
+    def web_admin_dist_dir(self) -> Path:
+        return self.root_dir / "app" / "web_admin" / "dist"
+
+    @property
+    def web_admin_index_file(self) -> Path:
+        return self.web_admin_dist_dir / "index.html"
 
     @property
     def output_dir(self) -> Path:

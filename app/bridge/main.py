@@ -4,7 +4,9 @@ import hmac
 import requests
 from fastapi import Depends, FastAPI, Header, HTTPException, Security, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from app.autocom.rest_client import AutocomRestClient
@@ -49,6 +51,36 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+admin_assets_dir = settings.web_admin_dist_dir / "assets"
+if admin_assets_dir.exists():
+    app.mount(
+        "/admin/assets",
+        StaticFiles(directory=str(admin_assets_dir)),
+        name="admin-assets",
+    )
+
+
+def serve_admin_index():
+    if not settings.web_admin_index_file.exists():
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "ADMIN_UI_NOT_BUILT",
+                "message": "React Admin UI is not built yet. Run npm install \u0026\u0026 npm run build inside admin-ui.",
+            },
+        )
+    return FileResponse(settings.web_admin_index_file)
+
+
+@app.get("/admin", include_in_schema=False)
+def admin_root():
+    return serve_admin_index()
+
+
+@app.get("/admin/{path:path}", include_in_schema=False)
+def admin_spa_fallback(path: str):
+    return serve_admin_index()
 
 
 class ClickTextRequest(BaseModel):
