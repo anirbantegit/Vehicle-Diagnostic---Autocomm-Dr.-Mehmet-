@@ -67,6 +67,7 @@ export type DiagnosticCapability = {
     name?: string;
     text?: string;
     title?: string;
+    carSelect?: string;
     protocol?: string | null;
     disabled?: boolean;
     data?: unknown;

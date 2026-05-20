@@ -111,6 +111,29 @@ function capabilityFunctionName(capability: DiagnosticCapability): string {
     return capability.name || capability.id || '';
 }
 
+function capabilityVehicleId(
+    capability: DiagnosticCapability,
+    fallbackVehicleDefinitionId: string,
+): string {
+    return capability.carSelect?.trim() || fallbackVehicleDefinitionId;
+}
+
+function capabilityProtocolLabel(capability: DiagnosticCapability): string {
+    const protocol = capability.protocol?.trim();
+
+    if (!protocol) {
+        return '';
+    }
+
+    // Autocom sometimes returns GUID-like protocol IDs.
+    // Keep them in payload, but avoid noisy button labels.
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(protocol)) {
+        return 'protocol';
+    }
+
+    return protocol;
+}
+
 export default function VehicleSelection() {
     const [listType, setListType] = useState<VehicleListType>('brands');
     const [parentId, setParentId] = useState('');
@@ -184,18 +207,20 @@ export default function VehicleSelection() {
     async function runCapability(capability: DiagnosticCapability) {
         const functionName = capabilityFunctionName(capability);
         const currentVehicleDefinitionId = ensureVehicleDefinitionId();
+        const diagnosticVehicleId = capabilityVehicleId(capability, currentVehicleDefinitionId);
 
         if (!functionName) {
             throw new Error('Selected capability does not contain a function name.');
         }
 
-        if (!eventSocketRef.current || eventSocketRef.current.readyState === WebSocket.CLOSED) {
-            connectEventStream();
+        if (!eventSocketRef.current || eventSocketRef.current.readyState !== WebSocket.OPEN) {
+            setError('Connect Live Diagnostic Events first, then run the diagnostic action.');
+            return;
         }
 
         if (functionName === 'scan_report' || functionName === 'report') {
             await runAction(`open-${functionName}`, () =>
-                openScanReport(currentVehicleDefinitionId),
+                openScanReport(diagnosticVehicleId),
             );
             return;
         }
@@ -203,7 +228,7 @@ export default function VehicleSelection() {
         await runAction(`run-${functionName}`, () =>
             runDiagnosis({
                 function_name: functionName,
-                vehicle_ids: [currentVehicleDefinitionId],
+                vehicle_ids: [diagnosticVehicleId],
                 protocol: protocol.trim() || capability.protocol || null,
                 data: capability.data ?? null,
             }),
@@ -496,7 +521,9 @@ export default function VehicleSelection() {
                                         onClick={() => runCapability(capability)}
                                     >
                                         {capabilityLabel(capability)}
-                                        {capability.protocol ? ` (${capability.protocol})` : ''}
+                                        {capabilityProtocolLabel(capability)
+                                            ? ` (${capabilityProtocolLabel(capability)})`
+                                            : ''}
                                     </button>
                                 ))}
                             </div>
