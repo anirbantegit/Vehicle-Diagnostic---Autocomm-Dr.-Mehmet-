@@ -1,11 +1,17 @@
-import React, {useMemo, useState} from 'react';
+import React, {useEffect, useMemo, useRef, useState} from 'react';
 import {
+    createDiagnosticsEventSocket,
+    DiagnosticCapability,
+    DiagnosticEventMessage,
     getVehicleCapabilities,
     getVehicleGuide,
+    openScanReport,
     getVehicleObdFunctions,
     getVehicleRtdFunctions,
     getVehicleSelection,
     postVehicleSelection,
+    runDiagnosis,
+    sendCarSelectionChanged,
     VehicleListType,
     VehicleSelectionItem,
     VehicleSelectionResponse,
@@ -93,6 +99,18 @@ function nextStep(current: VehicleListType): VehicleListType | null {
     return vehicleSteps[index + 1]?.type || null;
 }
 
+function isCapabilityList(value: unknown): value is DiagnosticCapability[] {
+    return Array.isArray(value);
+}
+
+function capabilityLabel(capability: DiagnosticCapability): string {
+    return capability.text || capability.title || capability.name || capability.id || 'Unnamed function';
+}
+
+function capabilityFunctionName(capability: DiagnosticCapability): string {
+    return capability.name || capability.id || '';
+}
+
 export default function VehicleSelection() {
     const [listType, setListType] = useState<VehicleListType>('brands');
     const [parentId, setParentId] = useState('');
@@ -100,6 +118,10 @@ export default function VehicleSelection() {
     const [protocol, setProtocol] = useState('');
     const [busy, setBusy] = useState('');
     const [error, setError] = useState('');
+    const [capabilities, setCapabilities] = useState<DiagnosticCapability[]>([]);
+    const [diagnosticEvents, setDiagnosticEvents] = useState<DiagnosticEventMessage[]>([]);
+    const [eventStreamStatus, setEventStreamStatus] = useState('closed');
+    const eventSocketRef = useRef<WebSocket | null>(null);
     const [response, setResponse] = useState<VehicleSelectionResponse | unknown>({
         message: 'Start with Brands / Cars, then click an item to continue the vehicle selection flow.',
     });
@@ -135,6 +157,79 @@ export default function VehicleSelection() {
         } finally {
             setBusy('');
         }
+    }
+    
+    function ensureVehicleDefinitionId(): string {
+        const cleanId = vehicleDefinitionId.trim();
+        if (!cleanId) {
+            throw new Error('Vehicle definition ID is required. Complete vehicle selection first.');
+        }
+        return cleanId;
+    }
+
+    async function notifyAutocomSelection() {
+        await runAction('car-selection-changed', () =>
+            sendCarSelectionChanged(ensureVehicleDefinitionId()),
+        );
+    }
+
+    async function loadCapabilities() {
+        await runAction('capabilities', async () => {
+            const result = await getVehicleCapabilities(ensureVehicleDefinitionId(), protocol);
+            setCapabilities(isCapabilityList(result) ? result : []);
+            return result;
+        });
+    }
+
+    async function runCapability(capability: DiagnosticCapability) {
+        const functionName = capabilityFunctionName(capability);
+        const currentVehicleDefinitionId = ensureVehicleDefinitionId();
+
+        if (!functionName) {
+            throw new Error('Selected capability does not contain a function name.');
+        }
+
+        if (!eventSocketRef.current || eventSocketRef.current.readyState === WebSocket.CLOSED) {
+            connectEventStream();
+        }
+
+        if (functionName === 'scan_report' || functionName === 'report') {
+            await runAction(`open-${functionName}`, () =>
+                openScanReport(currentVehicleDefinitionId),
+            );
+            return;
+        }
+
+        await runAction(`run-${functionName}`, () =>
+            runDiagnosis({
+                function_name: functionName,
+                vehicle_ids: [currentVehicleDefinitionId],
+                protocol: protocol.trim() || capability.protocol || null,
+                data: capability.data ?? null,
+            }),
+        );
+    }
+
+    function connectEventStream() {
+        if (eventSocketRef.current) {
+            eventSocketRef.current.close();
+            eventSocketRef.current = null;
+        }
+
+        setDiagnosticEvents([]);
+        setEventStreamStatus('connecting');
+        eventSocketRef.current = createDiagnosticsEventSocket(
+            (message) => {
+                setDiagnosticEvents((current) => [message, ...current].slice(0, 100));
+            },
+            setEventStreamStatus,
+        );
+    }
+
+    function disconnectEventStream() {
+        eventSocketRef.current?.close();
+        eventSocketRef.current = null;
+        setEventStreamStatus('closed');
     }
 
     async function loadCurrentStep() {
@@ -189,12 +284,20 @@ export default function VehicleSelection() {
         setParentId('');
         setVehicleDefinitionId('');
         setProtocol('');
+        setCapabilities([]);
+        setDiagnosticEvents([]);
         setSelectedPath([]);
         setResponse({
             message: 'Selection reset. Load Brands / Cars again.',
         });
         setError('');
     }
+
+    useEffect(() => {
+        return () => {
+            eventSocketRef.current?.close();
+        };
+    }, []);
 
     return (
         <div>
@@ -322,6 +425,13 @@ export default function VehicleSelection() {
                         <div style={{display: 'flex', flexWrap: 'wrap', gap: 10}}>
                             <button
                                 type="button"
+                                style={button}
+                                onClick={notifyAutocomSelection}
+                            >
+                                Notify Selection
+                            </button>
+                            <button
+                                type="button"
                                 style={secondaryButton}
                                 onClick={() =>
                                     runAction('guide', () => getVehicleGuide(vehicleDefinitionId))
@@ -331,12 +441,8 @@ export default function VehicleSelection() {
                             </button>
                             <button
                                 type="button"
-                                style={secondaryButton}
-                                onClick={() =>
-                                    runAction('capabilities', () =>
-                                        getVehicleCapabilities(vehicleDefinitionId, protocol),
-                                    )
-                                }
+                                style={button}
+                                onClick={loadCapabilities}
                             >
                                 Capabilities
                             </button>
@@ -363,6 +469,75 @@ export default function VehicleSelection() {
                                 RTD Functions
                             </button>
                         </div>
+                    </div>
+
+                    <div style={card}>
+                        <h3 style={{marginTop: 0}}>Ready Diagnostic Actions</h3>
+                        <p style={{color: '#64748b', fontSize: 13}}>
+                            Load capabilities first. Protocol is auto-used from the selected capability when available.
+                        </p>
+
+                        {capabilities.length === 0 ? (
+                            <p style={{color: '#64748b', margin: 0}}>
+                                No capabilities loaded yet.
+                            </p>
+                        ) : (
+                            <div style={{display: 'flex', flexWrap: 'wrap', gap: 10}}>
+                                {capabilities.map((capability, index) => (
+                                    <button
+                                        key={`${capability.id || capability.name || index}`}
+                                        type="button"
+                                        disabled={Boolean(capability.disabled)}
+                                        style={{
+                                            ...button,
+                                            opacity: capability.disabled ? 0.5 : 1,
+                                            cursor: capability.disabled ? 'not-allowed' : 'pointer',
+                                        }}
+                                        onClick={() => runCapability(capability)}
+                                    >
+                                        {capabilityLabel(capability)}
+                                        {capability.protocol ? ` (${capability.protocol})` : ''}
+                                    </button>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+
+                    <div style={card}>
+                        <h3 style={{marginTop: 0}}>Live Diagnostic Events</h3>
+                        <p style={{color: '#64748b', fontSize: 13}}>
+                            Status: <strong>{eventStreamStatus}</strong>
+                        </p>
+                        <div style={{display: 'flex', flexWrap: 'wrap', gap: 10}}>
+                            <button type="button" style={button} onClick={connectEventStream}>
+                                Connect Events
+                            </button>
+                            <button type="button" style={dangerButton} onClick={disconnectEventStream}>
+                                Disconnect
+                            </button>
+                            <button
+                                type="button"
+                                style={secondaryButton}
+                                onClick={() => setDiagnosticEvents([])}
+                            >
+                                Clear
+                            </button>
+                        </div>
+
+                        <pre
+                            style={{
+                                margin: '12px 0 0',
+                                padding: 14,
+                                borderRadius: 14,
+                                background: '#0f172a',
+                                color: '#dbeafe',
+                                overflow: 'auto',
+                                maxHeight: 280,
+                                fontSize: 12,
+                            }}
+                        >
+                            {JSON.stringify(diagnosticEvents, null, 2)}
+                        </pre>
                     </div>
                 </section>
 

@@ -54,6 +54,14 @@ def list_clients() -> list[dict]:
 
 def create_client(client_name: str, client_type: str) -> dict:
     clients = _read_clients()
+
+    # Product rule:
+    # allow only one active paired client per bridge installation.
+    # Keep old records for audit/history, but revoke them before issuing a new token.
+    for existing_client in clients:
+        if not existing_client.get("revoked"):
+            existing_client["revoked"] = True
+
     token = f"acb_cli_{secrets.token_urlsafe(32)}"
     client = {
         "client_id": f"cli_{secrets.token_hex(4)}",

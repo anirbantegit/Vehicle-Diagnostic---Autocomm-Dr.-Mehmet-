@@ -67,7 +67,7 @@ def serve_admin_index():
             status_code=404,
             detail={
                 "code": "ADMIN_UI_NOT_BUILT",
-                "message": "React Admin UI is not built yet. Run npm install \u0026\u0026 npm run build inside admin-ui.",
+                "message": "React Admin UI is not built yet. Run pnpm install && pnpm run build inside admin-ui.",
             },
         )
     return FileResponse(settings.web_admin_index_file)

@@ -62,6 +62,27 @@ export type RunDiagnosisPayload = {
     data?: unknown;
 };
 
+export type DiagnosticCapability = {
+    id?: string;
+    name?: string;
+    text?: string;
+    title?: string;
+    protocol?: string | null;
+    disabled?: boolean;
+    data?: unknown;
+    fraudcheck?: boolean;
+    presetEcus?: unknown[];
+    [key: string]: unknown;
+};
+
+export type DiagnosticEventMessage = {
+    event: string;
+    data: unknown;
+};
+
+export type DiagnosticEventHandler = (message: DiagnosticEventMessage) => void;
+
+
 export type VehicleListType =
     | 'brands'
     | 'models'
@@ -155,7 +176,13 @@ export async function bridgeRequest<T>(
     });
 
     const text = await response.text();
-    const data = text ? JSON.parse(text) : null;
+    let data: unknown = null;
+
+    try {
+        data = text ? JSON.parse(text) : null;
+    } catch {
+        data = {message: text || `Bridge request failed: ${response.status}`};
+    }
 
     if (!response.ok) {
         throw new Error(parseErrorMessage(data, response.status));
@@ -309,10 +336,79 @@ export function sendSignalr(payload: SignalRSendPayload): Promise<unknown> {
     });
 }
 
+export function sendCarSelectionChanged(vehicleDefinitionId: string): Promise<unknown> {
+    return sendSignalr({
+        event: 'carSelectionChanged',
+        data: vehicleDefinitionId,
+    });
+}
+
+export function viewHelpDocument(helpDocumentId: string): Promise<unknown> {
+    return sendSignalr({
+        event: 'viewHelpDocument',
+        data: helpDocumentId,
+    });
+}
+
+export function viewRtdHelpDocument(index: number): Promise<unknown> {
+    return sendSignalr({
+        event: 'viewRTDHelpDocument',
+        data: index,
+    });
+}
+
+export function openScanReport(vehicleDefinitionId: string): Promise<unknown> {
+    return sendSignalr({
+        event: 'openScanReport',
+        data: vehicleDefinitionId,
+    });
+}
+
 export function runDiagnosis(payload: RunDiagnosisPayload): Promise<unknown> {
     return bridgeRequest<unknown>('/bridge/diagnostics/run', {
         method: 'POST',
         body: JSON.stringify(payload),
+    });
+}
+
+export function createDiagnosticsEventSocket(
+    onMessage: DiagnosticEventHandler,
+    onStatus?: (status: string) => void,
+): WebSocket {
+    const token = encodeURIComponent(getAdminToken());
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const socket = new WebSocket(
+        `${wsProtocol}//${window.location.host}/bridge/diagnostics/events?token=${token}`,
+    );
+
+    socket.onopen = () => onStatus?.('connected');
+    socket.onclose = () => onStatus?.('closed');
+    socket.onerror = () => onStatus?.('error');
+    socket.onmessage = (event) => {
+        try {
+            onMessage(JSON.parse(event.data) as DiagnosticEventMessage);
+        } catch {
+            onMessage({
+                event: 'unparsed_message',
+                data: event.data,
+            });
+        }
+    };
+
+    return socket;
+}
+
+export function clickPoint(x: number, y: number): Promise<unknown> {
+    return bridgeRequest<unknown>('/bridge/ui/click-point', {
+        method: 'POST',
+        body: JSON.stringify({x, y}),
+    });
+}
+
+export function clickText(text: string): Promise<unknown> {
+    return bridgeRequest<unknown>('/bridge/ui/click-text', {
+        method: 'POST',
+        body: JSON.stringify({text}),
     });
 }
 

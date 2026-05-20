@@ -1,5 +1,7 @@
 import React, {useState} from 'react';
 import {
+    clickPoint,
+    clickText,
     connectSignalr,
     disconnectSignalr,
     getAgentStatus,
@@ -82,6 +84,9 @@ export default function EngineControl() {
     const [functionName, setFunctionName] = useState('');
     const [vehicleIds, setVehicleIds] = useState('');
     const [protocol, setProtocol] = useState('');
+    const [clickX, setClickX] = useState('35');
+    const [clickY, setClickY] = useState('145');
+    const [targetText, setTargetText] = useState('');
 
     async function runAction(label: string, action: () => Promise<unknown>) {
         setBusy(label);
@@ -104,6 +109,28 @@ export default function EngineControl() {
         }
         return JSON.parse(value);
     }
+
+    async function runCalibratedClickPoint() {
+        const x = Number(clickX);
+        const y = Number(clickY);
+
+        if (!Number.isFinite(x) || !Number.isFinite(y)) {
+            setError('Click X and Y must be valid numbers.');
+            return;
+        }
+
+        await runAction('click-point', () => clickPoint(x, y));
+    }
+
+    async function runVisibleTextClick() {
+        const text = targetText.trim();
+        if (!text) {
+            setError('Text to click is required.');
+            return;
+        }
+        await runAction('click-text', () => clickText(text));
+    }
+
 
     return (
         <div>
@@ -168,7 +195,7 @@ export default function EngineControl() {
                     <div style={panel}>
                         <h3 style={{marginTop: 0}}>Generic OBD / VCI</h3>
                         <p style={{color: '#64748b', fontSize: 13}}>
-                            Use this to verify the real Autocom UI automation path.
+                            Start Generic OBD uses the configured fallback coordinate. Search/Test VCI only works after the VCI setup screen is visible.
                         </p>
                         <div style={{display: 'flex', flexWrap: 'wrap', gap: 10}}>
                             <button
@@ -193,6 +220,71 @@ export default function EngineControl() {
                                 Test VCI
                             </button>
                         </div>
+                    </div>
+
+
+                    <div style={panel}>
+                        <h3 style={{marginTop: 0}}>UI Click Calibration</h3>
+                        <p style={{color: '#64748b', fontSize: 13}}>
+                            Use this when Generic OBD does not click the expected sidebar/menu item.
+                            Coordinates are relative to the Autocom window.
+                        </p>
+
+                        <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10}}>
+                            <div>
+                                <label style={{display: 'block', fontSize: 13, fontWeight: 700}}>
+                                    X
+                                </label>
+                                <input
+                                    value={clickX}
+                                    onChange={(event) => setClickX(event.target.value)}
+                                    style={{...input, margin: '6px 0 10px'}}
+                                />
+                            </div>
+                            <div>
+                                <label style={{display: 'block', fontSize: 13, fontWeight: 700}}>
+                                    Y
+                                </label>
+                                <input
+                                    value={clickY}
+                                    onChange={(event) => setClickY(event.target.value)}
+                                    style={{...input, margin: '6px 0 10px'}}
+                                />
+                            </div>
+                        </div>
+
+                        <button
+                            type="button"
+                            style={button}
+                            onClick={runCalibratedClickPoint}
+                        >
+                            Test Click Point
+                        </button>
+
+                        <label
+                            style={{
+                                display: 'block',
+                                fontSize: 13,
+                                fontWeight: 700,
+                                marginTop: 14,
+                            }}
+                        >
+                            Text to click
+                        </label>
+                        <input
+                            value={targetText}
+                            onChange={(event) => setTargetText(event.target.value)}
+                            placeholder="Example: Search"
+                            style={{...input, margin: '6px 0 10px'}}
+                        />
+
+                        <button
+                            type="button"
+                            style={secondaryButton}
+                            onClick={runVisibleTextClick}
+                        >
+                            Click Visible Text
+                        </button>
                     </div>
 
                     <div style={panel}>
