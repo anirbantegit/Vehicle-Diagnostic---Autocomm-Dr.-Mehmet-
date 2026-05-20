@@ -53,8 +53,8 @@ class Settings:
     default_wait_after_click: int = env_int("DEFAULT_WAIT_AFTER_CLICK", 2)
     debug_screenshots: bool = env_bool("DEBUG_SCREENSHOTS", False)
 
-    generic_obd_click_x: int = env_int("GENERIC_OBD_CLICK_X", 35)
-    generic_obd_click_y: int = env_int("GENERIC_OBD_CLICK_Y", 145)
+    generic_obd_click_x: int = env_int("GENERIC_OBD_CLICK_X", 52)
+    generic_obd_click_y: int = env_int("GENERIC_OBD_CLICK_Y", 280)
 
     @property
     def storage_dir(self) -> Path:

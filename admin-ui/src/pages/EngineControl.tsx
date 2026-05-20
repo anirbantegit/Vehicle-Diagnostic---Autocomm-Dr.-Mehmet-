@@ -8,7 +8,7 @@ import {
     getBridgeStatus,
     getScreenTexts,
     getSignalrStatus,
-    runDiagnosis,
+    runDiagnosis, ScreenTextItem, ScreenTextsResponse,
     searchVci,
     sendSignalr,
     startGenericObd,
@@ -84,9 +84,11 @@ export default function EngineControl() {
     const [functionName, setFunctionName] = useState('');
     const [vehicleIds, setVehicleIds] = useState('');
     const [protocol, setProtocol] = useState('');
-    const [clickX, setClickX] = useState('35');
-    const [clickY, setClickY] = useState('145');
+    const [clickX, setClickX] = useState('52');
+    const [clickY, setClickY] = useState('280');
     const [targetText, setTargetText] = useState('');
+    const [screenElements, setScreenElements] = useState<ScreenTextItem[]>([]);
+    const [screenFilter, setScreenFilter] = useState('');
 
     async function runAction(label: string, action: () => Promise<unknown>) {
         setBusy(label);
@@ -130,6 +132,47 @@ export default function EngineControl() {
         }
         await runAction('click-text', () => clickText(text));
     }
+
+    async function loadScreenElements() {
+        await runAction('screen-texts', async () => {
+            const result = await getScreenTexts();
+            setScreenElements((result as ScreenTextsResponse).texts || []);
+            return result;
+        });
+    }
+
+    async function clickScreenElement(item: ScreenTextItem) {
+        const x = item.rect_info?.relative_center_x;
+        const y = item.rect_info?.relative_center_y;
+
+        if (!Number.isFinite(x) || !Number.isFinite(y)) {
+            setError('Selected screen element does not have a valid relative center point.');
+            return;
+        }
+
+        await runAction('click-screen-element', () =>
+            clickPoint(Math.round(x as number), Math.round(y as number)),
+        );
+    }
+
+    const filteredScreenElements = screenElements.filter((item) => {
+        const keyword = screenFilter.trim().toLowerCase();
+        if (!keyword) {
+            return true;
+        }
+
+        return [
+            item.text,
+            item.control_type,
+            item.automation_id,
+            item.class_name,
+            item.rect,
+        ]
+            .join(' ')
+            .toLowerCase()
+            .includes(keyword);
+    });
+
 
 
     return (
@@ -185,9 +228,9 @@ export default function EngineControl() {
                             <button
                                 type="button"
                                 style={secondaryButton}
-                                onClick={() => runAction('screen-texts', getScreenTexts)}
+                                onClick={loadScreenElements}
                             >
-                                Screen Texts
+                                Fetch Screen Elements
                             </button>
                         </div>
                     </div>
@@ -285,6 +328,83 @@ export default function EngineControl() {
                         >
                             Click Visible Text
                         </button>
+                    </div>
+
+
+                    <div style={panel}>
+                        <h3 style={{marginTop: 0}}>Visible Screen Elements</h3>
+                        <p style={{color: '#64748b', fontSize: 13}}>
+                            Fetch UIA elements from the Autocom window, filter them, and click the center point of any visible element.
+                        </p>
+
+                        <div style={{display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 10}}>
+                            <button type="button" style={button} onClick={loadScreenElements}>
+                                Refresh Elements
+                            </button>
+                            <input
+                                value={screenFilter}
+                                onChange={(event) => setScreenFilter(event.target.value)}
+                                placeholder="Filter by text, type, rect..."
+                                style={{...input, flex: 1, minWidth: 180}}
+                            />
+                        </div>
+
+                        <div style={{maxHeight: 360, overflow: 'auto', border: '1px solid #e2e8f0', borderRadius: 14}}>
+                            <table style={{width: '100%', borderCollapse: 'collapse', fontSize: 12}}>
+                                <thead>
+                                <tr style={{background: '#f8fafc'}}>
+                                    <th style={screenTh}>Text</th>
+                                    <th style={screenTh}>Type</th>
+                                    <th style={screenTh}>Relative center</th>
+                                    <th style={screenTh}>Rect</th>
+                                    <th style={screenTh}>Action</th>
+                                </tr>
+                                </thead>
+                                <tbody>
+                                {filteredScreenElements.length === 0 && (
+                                    <tr>
+                                        <td style={screenTd} colSpan={5}>
+                                            No elements loaded. Click “Fetch Screen Elements”.
+                                        </td>
+                                    </tr>
+                                )}
+
+                                {filteredScreenElements.map((item, index) => {
+                                    const x = item.rect_info?.relative_center_x;
+                                    const y = item.rect_info?.relative_center_y;
+                                    const canClick = Number.isFinite(x) && Number.isFinite(y);
+
+                                    return (
+                                        <tr key={`${item.text}-${item.rect}-${index}`}>
+                                            <td style={screenTd}>
+                                                <strong>{item.text}</strong>
+                                                {item.automation_id && (
+                                                    <div style={{color: '#64748b'}}>
+                                                        id: {item.automation_id}
+                                                    </div>
+                                                )}
+                                            </td>
+                                            <td style={screenTd}>{item.control_type}</td>
+                                            <td style={screenTd}>
+                                                {canClick ? `${Math.round(x as number)}, ${Math.round(y as number)}` : '-'}
+                                            </td>
+                                            <td style={screenTd}>{item.rect}</td>
+                                            <td style={screenTd}>
+                                                <button
+                                                    type="button"
+                                                    style={secondaryButton}
+                                                    disabled={!canClick}
+                                                    onClick={() => clickScreenElement(item)}
+                                                >
+                                                    Click
+                                                </button>
+                                            </td>
+                                        </tr>
+                                    );
+                                })}
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
 
                     <div style={panel}>
@@ -425,3 +545,17 @@ export default function EngineControl() {
     )
 
 }
+
+
+const screenTh: React.CSSProperties = {
+    textAlign: 'left',
+    padding: '8px 10px',
+    borderBottom: '1px solid #e2e8f0',
+    color: '#475569',
+};
+
+const screenTd: React.CSSProperties = {
+    padding: '8px 10px',
+    borderBottom: '1px solid #eef2f7',
+    verticalAlign: 'top',
+};

@@ -4,10 +4,11 @@ import EngineControl from './pages/EngineControl';
 import VehicleSelection from './pages/VehicleSelection';
 import Pairing from './pages/Pairing';
 import Clients from './pages/Clients';
+import DebugLogs from './pages/DebugLogs';
 import Settings from './pages/Settings';
 import {getAdminToken, setAdminToken} from './api/bridgeClient';
 
-type PageKey = 'dashboard' | 'vehicle-selection' | 'engine' | 'pairing' | 'clients' | 'settings';
+type PageKey = 'dashboard' | 'vehicle-selection' | 'engine' | 'pairing' | 'clients' | 'logs' | 'settings';
 
 const pages: Array<{ key: PageKey; label: string; description: string }> = [
     {key: 'dashboard', label: 'Dashboard', description: 'Bridge, Agent, Autocom status'},
@@ -15,6 +16,7 @@ const pages: Array<{ key: PageKey; label: string; description: string }> = [
     {key: 'engine', label: 'Engine Control', description: 'Screen dump, Generic OBD, VCI, SignalR'},
     {key: 'pairing', label: 'Pairing', description: 'Device identity and QR pairing'},
     {key: 'clients', label: 'Clients', description: 'Paired devices and revoke access'},
+    {key: 'logs', label: 'Super Logs', description: 'Actions, responses, errors, events'},
     {key: 'settings', label: 'Settings', description: 'Admin token and runtime notes'},
 ];
 
@@ -121,6 +123,8 @@ function renderPage(page: PageKey) {
             return <Pairing/>;
         case 'clients':
             return <Clients/>;
+        case 'logs':
+            return <DebugLogs/>;
         case 'settings':
             return <Settings/>;
         default:

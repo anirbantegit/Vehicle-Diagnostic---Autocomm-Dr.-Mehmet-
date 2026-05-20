@@ -1,4 +1,5 @@
 export const ADMIN_TOKEN_STORAGE_KEY = 'autocom_bridge_admin_token';
+export const ACTION_LOG_STORAGE_KEY = 'autocom_bridge_action_logs';
 
 export type BridgeIdentity = {
     device_id: string;
@@ -83,6 +84,56 @@ export type DiagnosticEventMessage = {
 
 export type DiagnosticEventHandler = (message: DiagnosticEventMessage) => void;
 
+export type UiRectInfo = {
+    left: number;
+    top: number;
+    right: number;
+    bottom: number;
+    width: number;
+    height: number;
+    center_x: number;
+    center_y: number;
+    relative_left?: number;
+    relative_top?: number;
+    relative_center_x?: number;
+    relative_center_y?: number;
+};
+
+export type ScreenTextItem = {
+    text: string;
+    control_type: string;
+    automation_id: string;
+    class_name: string;
+    rect: string;
+    rect_info?: UiRectInfo;
+};
+
+export type ScreenTextsResponse = {
+    timestamp: string;
+    window_title: string;
+    window_rect?: UiRectInfo;
+    text_count: number;
+    texts: ScreenTextItem[];
+};
+
+export type ActionLogEntry = {
+    id: string;
+    timestamp: string;
+    level: 'info' | 'success' | 'error' | 'event';
+    source: string;
+    action: string;
+    method?: string;
+    path?: string;
+    request?: unknown;
+    response?: unknown;
+    error?: string;
+    duration_ms?: number;
+};
+
+const MAX_ACTION_LOGS = 300;
+const MAX_LOG_PAYLOAD_CHARS = 200_000;
+const actionLogListeners = new Set<(logs: ActionLogEntry[]) => void>();
+
 
 export type VehicleListType =
     | 'brands'
@@ -129,6 +180,112 @@ export function clearAdminToken(): void {
     localStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY);
 }
 
+function nowLogId(): string {
+    return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function safeStringify(value: unknown): string {
+    try {
+        return JSON.stringify(value);
+    } catch {
+        return String(value);
+    }
+}
+
+function clipForLog(value: unknown): unknown {
+    if (value === undefined) {
+        return undefined;
+    }
+
+    const text = safeStringify(value);
+    if (text.length <= MAX_LOG_PAYLOAD_CHARS) {
+        try {
+            return JSON.parse(text);
+        } catch {
+            return value;
+        }
+    }
+
+    return {
+        truncated: true,
+        original_size: text.length,
+        preview: text.slice(0, MAX_LOG_PAYLOAD_CHARS),
+    };
+}
+
+function normalizeRequestBody(body: BodyInit | null | undefined): unknown {
+    if (!body) {
+        return null;
+    }
+
+    if (typeof body === 'string') {
+        try {
+            return JSON.parse(body);
+        } catch {
+            return body;
+        }
+    }
+
+    return '[non-json-body]';
+}
+
+function notifyActionLogListeners(logs: ActionLogEntry[]) {
+    actionLogListeners.forEach((listener) => listener(logs));
+}
+
+export function getActionLogs(): ActionLogEntry[] {
+    try {
+        const raw = localStorage.getItem(ACTION_LOG_STORAGE_KEY);
+        return raw ? JSON.parse(raw) : [];
+    } catch {
+        return [];
+    }
+}
+
+export function appendActionLog(entry: Omit<ActionLogEntry, 'id' | 'timestamp'>): ActionLogEntry {
+    const nextEntry: ActionLogEntry = {
+        id: nowLogId(),
+        timestamp: new Date().toISOString(),
+        ...entry,
+        request: clipForLog(entry.request),
+        response: clipForLog(entry.response),
+    };
+
+    const logs = [nextEntry, ...getActionLogs()].slice(0, MAX_ACTION_LOGS);
+
+    try {
+        localStorage.setItem(ACTION_LOG_STORAGE_KEY, JSON.stringify(logs));
+    } catch {
+        localStorage.setItem(ACTION_LOG_STORAGE_KEY, JSON.stringify(logs.slice(0, 50)));
+    }
+
+    notifyActionLogListeners(getActionLogs());
+    return nextEntry;
+}
+
+export function clearActionLogs(): void {
+    localStorage.removeItem(ACTION_LOG_STORAGE_KEY);
+    notifyActionLogListeners([]);
+}
+
+export function subscribeActionLogs(listener: (logs: ActionLogEntry[]) => void): () => void {
+    actionLogListeners.add(listener);
+    return () => actionLogListeners.delete(listener);
+}
+
+export function downloadActionLogs(): void {
+    const blob = new Blob([JSON.stringify(getActionLogs(), null, 2)], {
+        type: 'application/json',
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `autocom-bridge-debug-log-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+}
+
+
 function buildHeaders(options?: RequestInit, authenticated = true): HeadersInit {
     const token = getAdminToken();
 
@@ -171,10 +328,30 @@ export async function bridgeRequest<T>(
     options: RequestInit = {},
     authenticated = true,
 ): Promise<T> {
-    const response = await fetch(path, {
-        ...options,
-        headers: buildHeaders(options, authenticated),
-    });
+    const method = (options.method || 'GET').toUpperCase();
+    const requestBody = normalizeRequestBody(options.body);
+    const startedAt = performance.now();
+    let response: Response;
+
+    try {
+        response = await fetch(path, {
+            ...options,
+            headers: buildHeaders(options, authenticated),
+        });
+    } catch (exc) {
+        const message = exc instanceof Error ? exc.message : String(exc);
+        appendActionLog({
+            level: 'error',
+            source: 'bridgeClient',
+            action: 'network_error',
+            method,
+            path,
+            request: requestBody,
+            error: message,
+            duration_ms: Math.round(performance.now() - startedAt),
+        });
+        throw exc;
+    }
 
     const text = await response.text();
     let data: unknown = null;
@@ -186,8 +363,31 @@ export async function bridgeRequest<T>(
     }
 
     if (!response.ok) {
-        throw new Error(parseErrorMessage(data, response.status));
+        const message = parseErrorMessage(data, response.status);
+        appendActionLog({
+            level: 'error',
+            source: 'bridgeClient',
+            action: 'request_failed',
+            method,
+            path,
+            request: requestBody,
+            response: data,
+            error: message,
+            duration_ms: Math.round(performance.now() - startedAt),
+        });
+        throw new Error(message);
     }
+
+    appendActionLog({
+        level: 'success',
+        source: 'bridgeClient',
+        action: 'request_success',
+        method,
+        path,
+        request: requestBody,
+        response: data,
+        duration_ms: Math.round(performance.now() - startedAt),
+    });
 
     return data as T;
 }
@@ -292,8 +492,8 @@ export function getVehicleRtdFunctions(
 }
 
 
-export function getScreenTexts(): Promise<unknown> {
-    return bridgeRequest<unknown>('/bridge/screen/texts');
+export function getScreenTexts(): Promise<ScreenTextsResponse> {
+    return bridgeRequest<ScreenTextsResponse>('/bridge/screen/texts');
 }
 
 export function startGenericObd(): Promise<unknown> {
@@ -382,17 +582,57 @@ export function createDiagnosticsEventSocket(
         `${wsProtocol}//${window.location.host}/bridge/diagnostics/events?token=${token}`,
     );
 
-    socket.onopen = () => onStatus?.('connected');
-    socket.onclose = () => onStatus?.('closed');
-    socket.onerror = () => onStatus?.('error');
+    socket.onopen = () => {
+        appendActionLog({
+            level: 'event',
+            source: 'diagnosticsWebSocket',
+            action: 'open',
+            path: '/bridge/diagnostics/events',
+        });
+        onStatus?.('connected');
+    };
+    socket.onclose = () => {
+        appendActionLog({
+            level: 'event',
+            source: 'diagnosticsWebSocket',
+            action: 'close',
+            path: '/bridge/diagnostics/events',
+        });
+        onStatus?.('closed');
+    };
+    socket.onerror = () => {
+        appendActionLog({
+            level: 'error',
+            source: 'diagnosticsWebSocket',
+            action: 'error',
+            path: '/bridge/diagnostics/events',
+        });
+        onStatus?.('error');
+    };
     socket.onmessage = (event) => {
         try {
-            onMessage(JSON.parse(event.data) as DiagnosticEventMessage);
+            const message = JSON.parse(event.data) as DiagnosticEventMessage;
+            appendActionLog({
+                level: 'event',
+                source: 'diagnosticsWebSocket',
+                action: 'message',
+                path: '/bridge/diagnostics/events',
+                response: message,
+            });
+            onMessage(message);
         } catch {
-            onMessage({
+            const message = {
                 event: 'unparsed_message',
                 data: event.data,
+            };
+            appendActionLog({
+                level: 'event',
+                source: 'diagnosticsWebSocket',
+                action: 'unparsed_message',
+                path: '/bridge/diagnostics/events',
+                response: message,
             });
+            onMessage(message);
         }
     };
 

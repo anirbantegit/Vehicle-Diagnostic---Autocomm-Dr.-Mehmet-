@@ -5,8 +5,40 @@ from pathlib import Path
 from app.config import ROOT_DIR
 
 
+def rect_to_dict(rect, window_rect=None):
+    left = int(rect.left)
+    top = int(rect.top)
+    right = int(rect.right)
+    bottom = int(rect.bottom)
+    center_x = int((left + right) / 2)
+    center_y = int((top + bottom) / 2)
+
+    result = {
+        "left": left,
+        "top": top,
+        "right": right,
+        "bottom": bottom,
+        "width": max(0, right - left),
+        "height": max(0, bottom - top),
+        "center_x": center_x,
+        "center_y": center_y,
+    }
+
+    if window_rect is not None:
+        result.update({
+            "relative_left": left - int(window_rect.left),
+            "relative_top": top - int(window_rect.top),
+            "relative_center_x": center_x - int(window_rect.left),
+            "relative_center_y": center_y - int(window_rect.top),
+        })
+
+    return result
+
+
 def extract_visible_texts(win):
     texts = []
+    win_rect = win.rectangle()
+    window_rect = rect_to_dict(win_rect)
 
     for ctrl in win.descendants():
         try:
@@ -15,12 +47,16 @@ def extract_visible_texts(win):
             if not text or not text.strip():
                 continue
 
+            rect = ctrl.rectangle()
+            rect_info = rect_to_dict(rect, win_rect)
+
             texts.append({
                 "text": text.strip(),
                 "control_type": ctrl.element_info.control_type,
                 "automation_id": ctrl.element_info.automation_id,
                 "class_name": ctrl.element_info.class_name,
-                "rect": str(ctrl.rectangle())
+                "rect": str(rect),
+                "rect_info": rect_info,
             })
         except Exception:
             pass
@@ -28,6 +64,7 @@ def extract_visible_texts(win):
     return {
         "timestamp": datetime.now().isoformat(),
         "window_title": win.window_text(),
+        "window_rect": window_rect,
         "text_count": len(texts),
         "texts": texts
     }
