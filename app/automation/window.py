@@ -3,6 +3,13 @@ import time
 from pywinauto import Desktop
 from app.config import WINDOW_TITLE_RE
 
+def display_engine_label(title: str) -> str:
+    normalized = title.lower()
+    if "truck" in normalized:
+        return "2021.11 Truck"
+    if "car" in normalized:
+        return "2021.11 Cars"
+    return "Diagnostic Engine"
 
 def list_visible_windows(desktop):
     titles = []
@@ -48,11 +55,9 @@ def select_autocom_window(desktop):
     matches = find_matching_windows(desktop)
 
     if not matches:
-        print("Could not find Autocom window.")
-        print("Detected visible windows:")
-        for title in list_visible_windows(desktop):
-            print("-", title)
-        raise RuntimeError("Autocom window not found")
+        print("Could not find diagnostic engine window.")
+        print("Visible window count:", len(list_visible_windows(desktop)))
+        raise RuntimeError("Diagnostic engine window not found")
 
     # Prefer visible/larger window if duplicate matching windows exist.
     matches.sort(
@@ -66,8 +71,8 @@ def select_autocom_window(desktop):
     selected = matches[0]
 
     if len(matches) > 1:
-        print("Multiple matching Autocom windows found.")
-        print("Using:", selected.window_text())
+        print("Multiple matching diagnostic engine windows found.")
+        print("Using configured engine target.")
 
     return selected
 
@@ -79,10 +84,8 @@ def connect_autocom_window():
     try:
         win = select_autocom_window(desktop)
     except Exception as exc:
-        print("Could not connect to Autocom window.")
-        print("Detected visible windows:")
-        for title in list_visible_windows(desktop):
-            print("-", title)
+        print("Could not connect to diagnostic engine window.")
+        print("Visible window count:", len(list_visible_windows(desktop)))
         raise exc
 
     try:
@@ -107,11 +110,11 @@ def get_autocom_window_status():
     if not matches:
         return {
             "found": False,
-            "title": None,
+            "engine_label": None,
             "visible": False,
             "minimized": None,
             "rect": None,
-            "visible_windows": list_visible_windows(desktop),
+            "visible_windows_count": len(list_visible_windows(desktop)),
         }
 
     matches.sort(
@@ -126,7 +129,7 @@ def get_autocom_window_status():
     rect = win.rectangle()
     return {
         "found": True,
-        "title": win.window_text(),
+        "engine_label": display_engine_label(win.window_text()),
         "visible": bool(win.is_visible()),
         "minimized": bool(win.is_minimized()),
         "rect": {"left": rect.left, "top": rect.top, "right": rect.right, "bottom": rect.bottom},

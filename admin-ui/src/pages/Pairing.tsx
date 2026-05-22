@@ -1,6 +1,13 @@
 import React, {useEffect, useState} from 'react';
 import {QRCodeCanvas} from 'qrcode.react';
-import {BridgeIdentity, getPublicIdentity, PairingStartResponse, startPairing,} from '../api/bridgeClient';
+import {
+    BridgeIdentity,
+    getPairingStatus,
+    getPublicIdentity,
+    PairingStartResponse,
+    startPairing,
+} from '../api/bridgeClient';
+import {redactDisplayValue} from '../utils/redactDisplay';
 
 const card: React.CSSProperties = {
     background: '#fff',
@@ -33,7 +40,7 @@ function JsonBlock({value}: { value: unknown }) {
                 fontSize: 12,
             }}
         >
-      {JSON.stringify(value, null, 2)}
+      {JSON.stringify(redactDisplayValue(value), null, 2)}
     </pre>
     );
 }
@@ -41,8 +48,8 @@ function JsonBlock({value}: { value: unknown }) {
 export default function Pairing() {
     const [identity, setIdentity] = useState<BridgeIdentity | null>(null);
     const [pairing, setPairing] = useState<PairingStartResponse | null>(null);
+    const [pairingStatus, setPairingStatus] = useState<'idle' | 'pending' | 'claimed' | 'expired'>('idle');
     const [error, setError] = useState('');
-    const [copied, setCopied] = useState(false);
 
     async function loadIdentity() {
         try {
@@ -54,22 +61,45 @@ export default function Pairing() {
 
     async function handleStartPairing() {
         setError('');
-        setCopied(false);
         try {
-            setPairing(await startPairing());
+            const result = await startPairing();
+            setPairing(result);
+            setPairingStatus('pending');
         } catch (exc) {
             setError(exc instanceof Error ? exc.message : String(exc));
         }
     }
 
-    async function copyPayload() {
-        if (!pairing) {
+    useEffect(() => {
+        if (!pairing || pairingStatus !== 'pending') {
             return;
         }
 
-        await navigator.clipboard.writeText(JSON.stringify(pairing.qr_payload, null, 2));
-        setCopied(true);
-    }
+        let cancelled = false;
+
+        const pollStatus = async () => {
+            try {
+                const status = await getPairingStatus(pairing.pairing_id);
+                if (!cancelled) {
+                    setPairingStatus(status.status);
+                }
+            } catch (exc) {
+                if (!cancelled) {
+                    setError(exc instanceof Error ? exc.message : String(exc));
+                }
+            }
+        };
+
+        void pollStatus();
+        const timer = window.setInterval(() => {
+            void pollStatus();
+        }, 1500);
+
+        return () => {
+            cancelled = true;
+            window.clearInterval(timer);
+        };
+    }, [pairing, pairingStatus]);
 
     useEffect(() => {
         loadIdentity();
@@ -111,7 +141,9 @@ export default function Pairing() {
                     <p style={{color: '#64748b', fontSize: 13}}>
                         Pairing expires quickly. Use this only while the technician is present.
                     </p>
-
+                    <p>
+                        Pairing status: <strong>{pairingStatus}</strong>
+                    </p>
                     <button type="button" onClick={handleStartPairing} style={button}>
                         Generate Pairing QR
                     </button>
@@ -127,31 +159,16 @@ export default function Pairing() {
                                     border: '1px solid #e2e8f0',
                                 }}
                             >
-                                <QRCodeCanvas value={qrText} size={240} includeMargin/>
+                                <QRCodeCanvas value={qrText} size={240} marginSize={10}/>
                             </div>
 
                             <p style={{color: '#64748b', fontSize: 13}}>
                                 Expires at: <strong>{pairing.expires_at}</strong>
                             </p>
-
-                            <button
-                                type="button"
-                                onClick={copyPayload}
-                                style={{...button, background: '#0f172a'}}
-                            >
-                                {copied ? 'Copied' : 'Copy QR Payload'}
-                            </button>
                         </div>
                     )}
                 </section>
             </div>
-
-            {pairing && (
-                <section style={{...card, marginTop: 18}}>
-                    <h3 style={{marginTop: 0}}>Pairing Payload</h3>
-                    <JsonBlock value={pairing.qr_payload}/>
-                </section>
-            )}
         </div>
     );
 }

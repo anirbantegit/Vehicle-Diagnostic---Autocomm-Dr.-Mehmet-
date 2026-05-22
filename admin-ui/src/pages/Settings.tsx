@@ -1,5 +1,4 @@
-import React, {useState} from 'react';
-import {clearAdminToken, getAdminToken, setAdminToken,} from '../api/bridgeClient';
+import React from 'react';
 
 const card: React.CSSProperties = {
     background: '#fff',
@@ -9,45 +8,7 @@ const card: React.CSSProperties = {
     border: '1px solid #e6eaf2',
 };
 
-const button: React.CSSProperties = {
-    border: 0,
-    borderRadius: 12,
-    padding: '10px 14px',
-    background: '#2563eb',
-    color: '#fff',
-    cursor: 'pointer',
-    fontWeight: 700,
-};
-
-const dangerButton: React.CSSProperties = {
-    ...button,
-    background: '#dc2626',
-};
-
-const input: React.CSSProperties = {
-    width: '100%',
-    boxSizing: 'border-box',
-    borderRadius: 12,
-    border: '1px solid #cbd5e1',
-    padding: '10px 12px',
-    outline: 'none',
-};
-
 export default function Settings() {
-    const [token, setToken] = useState(getAdminToken());
-    const [saved, setSaved] = useState(false);
-
-    function saveToken() {
-        setAdminToken(token);
-        setSaved(true);
-        window.setTimeout(() => setSaved(false), 1500);
-    }
-
-    function clearToken() {
-        clearAdminToken();
-        setToken('');
-        setSaved(false);
-    }
 
     return (
         <div>
@@ -60,32 +21,11 @@ export default function Settings() {
 
             <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 18}}>
                 <section style={card}>
-                    <h3 style={{marginTop: 0}}>Admin Token</h3>
+                    <h3 style={{marginTop: 0}}>Local Console Security</h3>
                     <p style={{color: '#64748b', fontSize: 13}}>
-                        This token is stored in browser localStorage and used as Bearer auth
-                        for Bridge Service admin APIs.
+                        Administrator authentication is generated and managed locally by the
+                        service. No credential entry or copying is required.
                     </p>
-
-                    <input
-                        value={token}
-                        onChange={(event) => setToken(event.target.value)}
-                        placeholder="Paste admin token"
-                        style={input}
-                    />
-
-                    <div style={{display: 'flex', gap: 10, marginTop: 12}}>
-                        <button type="button" style={button} onClick={saveToken}>
-                            Save Token
-                        </button>
-                        <button type="button" style={dangerButton} onClick={clearToken}>
-                            Clear
-                        </button>
-                    </div>
-
-                    {saved && (
-                        <p style={{color: '#166534', fontWeight: 700}}>Saved successfully.
-                        </p>
-                    )}
                 </section>
 
                 <section style={card}>
@@ -113,7 +53,7 @@ python scripts\\run_bridge.py`}
                 </section>
 
                 <section style={card}>
-                    <h3 style={{marginTop: 0}}>Architecture Rule</h3>
+                    <h3 style={{marginTop: 0}}>Runtime Architecture</h3>
                     <pre style={preStyle}>
     {`React Admin UI
   ↓ calls only
@@ -121,7 +61,7 @@ Bridge Service :8090
   ↓ calls only when automation needed
 Desktop Agent :8091
   ↓ pywinauto
-Autocom Cars CDP+ visible window`}
+Detected Diagnostic Engine window`}
     </pre>
                 </section>
 

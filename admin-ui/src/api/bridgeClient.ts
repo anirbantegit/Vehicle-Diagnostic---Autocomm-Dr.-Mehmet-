@@ -1,5 +1,19 @@
-export const ADMIN_TOKEN_STORAGE_KEY = 'autocom_bridge_admin_token';
-export const ACTION_LOG_STORAGE_KEY = 'autocom_bridge_action_logs';
+import {redactDisplayText} from '../utils/redactDisplay';
+export const ACTION_LOG_STORAGE_KEY = 'diagnostic_bridge_action_logs';
+const LEGACY_ADMIN_TOKEN_STORAGE_KEY = 'autocom_bridge_admin_token';
+const LEGACY_ACTION_LOG_STORAGE_KEY = 'autocom_bridge_action_logs';
+
+let adminCsrfToken = '';
+
+const REDACTED_KEYS = new Set([
+    'access_token',
+    'authorization',
+    'csrf_token',
+    'pairing_secret',
+    'token',
+    'token_hash',
+]);
+
 
 export type BridgeIdentity = {
     device_id: string;
@@ -23,7 +37,6 @@ export type BridgeStatus = {
 
 export type PairingStartResponse = {
     pairing_id: string;
-    pairing_secret: string;
     expires_in: number;
     expires_at: string;
     qr_payload: {
@@ -37,6 +50,17 @@ export type PairingStartResponse = {
         expires_at: string;
     };
 };
+
+export type PairingStatus = 'pending' | 'claimed' | 'expired';
+
+export type PairingStatusResponse = {
+    pairing_id: string;
+    status: PairingStatus;
+    expires_at?: string;
+    client_id?: string;
+    client_name?: string;
+};
+
 
 export type PairedClient = {
     client_id: string;
@@ -168,16 +192,62 @@ export type VehicleSelectionResponse = {
     [key: string]: unknown;
 };
 
-export function getAdminToken(): string {
-    return localStorage.getItem(ADMIN_TOKEN_STORAGE_KEY) || '';
+export type AdminSessionResponse = {
+    authenticated: boolean;
+    csrf_token: string;
+    expires_at: string;
+};
+
+export type HealthState = 'healthy' | 'attention' | 'blocked';
+
+export type HealthResponse = {
+    overall: HealthState;
+    bridge: {status: HealthState; message: string};
+    desktop_agent: {status: HealthState; message: string};
+    engine: {status: HealthState; detected: boolean; engine_label?: string | null; message: string};
+    mobile_pairing: {status: HealthState; active_devices: number; message: string};
+    hardware: {status: HealthState; verification: string; message: string};
+};
+
+function redactSensitiveValue(value: unknown): unknown {
+    if (typeof value === 'string') {
+        return redactDisplayText(value);
+    }
+
+    if (Array.isArray(value)) {
+        return value.map(redactSensitiveValue);
+    }
+
+    if (value && typeof value === 'object') {
+        return Object.fromEntries(
+            Object.entries(value as Record<string, unknown>).map(([key, nestedValue]) => [
+                redactDisplayText(key),
+                REDACTED_KEYS.has(key.toLowerCase())
+                    ? '[REDACTED]'
+                    : redactSensitiveValue(nestedValue),
+            ]),
+        );
+    }
+
+    return value;
 }
 
-export function setAdminToken(token: string): void {
-    localStorage.setItem(ADMIN_TOKEN_STORAGE_KEY, token.trim());
-}
+export async function bootstrapAdminSession(): Promise<void> {
+    localStorage.removeItem(LEGACY_ADMIN_TOKEN_STORAGE_KEY);
+    localStorage.removeItem(LEGACY_ACTION_LOG_STORAGE_KEY);
 
-export function clearAdminToken(): void {
-    localStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY);
+    const response = await fetch('/bridge/admin/session', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {'Content-Type': 'application/json'},
+    });
+
+    if (!response.ok) {
+        throw new Error('Unable to initialise the local Admin Console session.');
+    }
+
+    const session = (await response.json()) as AdminSessionResponse;
+    adminCsrfToken = session.csrf_token;
 }
 
 function nowLogId(): string {
@@ -197,12 +267,13 @@ function clipForLog(value: unknown): unknown {
         return undefined;
     }
 
-    const text = safeStringify(value);
+    const redactedValue = redactSensitiveValue(value);
+    const text = safeStringify(redactedValue);
     if (text.length <= MAX_LOG_PAYLOAD_CHARS) {
         try {
             return JSON.parse(text);
         } catch {
-            return value;
+            return redactedValue;
         }
     }
 
@@ -236,7 +307,10 @@ function notifyActionLogListeners(logs: ActionLogEntry[]) {
 export function getActionLogs(): ActionLogEntry[] {
     try {
         const raw = localStorage.getItem(ACTION_LOG_STORAGE_KEY);
-        return raw ? JSON.parse(raw) : [];
+        const parsed = raw ? JSON.parse(raw) : [];
+        return Array.isArray(parsed)
+            ? redactSensitiveValue(parsed) as ActionLogEntry[]
+            : [];
     } catch {
         return [];
     }
@@ -247,6 +321,10 @@ export function appendActionLog(entry: Omit<ActionLogEntry, 'id' | 'timestamp'>)
         id: nowLogId(),
         timestamp: new Date().toISOString(),
         ...entry,
+        source: redactDisplayText(entry.source),
+        action: redactDisplayText(entry.action),
+        path: entry.path ? redactDisplayText(entry.path) : undefined,
+        error: entry.error ? redactDisplayText(entry.error) : undefined,
         request: clipForLog(entry.request),
         response: clipForLog(entry.response),
     };
@@ -274,24 +352,22 @@ export function subscribeActionLogs(listener: (logs: ActionLogEntry[]) => void):
 }
 
 export function downloadActionLogs(): void {
-    const blob = new Blob([JSON.stringify(getActionLogs(), null, 2)], {
+    const blob = new Blob([JSON.stringify(redactSensitiveValue(getActionLogs()), null, 2)], {
         type: 'application/json',
     });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = `autocom-bridge-debug-log-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+    link.download = `diagnostic-bridge-debug-log-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
     link.click();
     URL.revokeObjectURL(url);
 }
 
 
 function buildHeaders(options?: RequestInit, authenticated = true): HeadersInit {
-    const token = getAdminToken();
-
     return {
         'Content-Type': 'application/json',
-        ...(authenticated && token ? {Authorization: `Bearer ${token}`} : {}),
+        ...(authenticated && adminCsrfToken ? {'X-CSRF-Token': adminCsrfToken} : {}),
         ...(options?.headers || {}),
     };
 }
@@ -336,6 +412,7 @@ export async function bridgeRequest<T>(
     try {
         response = await fetch(path, {
             ...options,
+            credentials: 'same-origin',
             headers: buildHeaders(options, authenticated),
         });
     } catch (exc) {
@@ -363,7 +440,7 @@ export async function bridgeRequest<T>(
     }
 
     if (!response.ok) {
-        const message = parseErrorMessage(data, response.status);
+        const message = redactDisplayText(parseErrorMessage(data, response.status));
         appendActionLog({
             level: 'error',
             source: 'bridgeClient',
@@ -576,10 +653,9 @@ export function createDiagnosticsEventSocket(
     onMessage: DiagnosticEventHandler,
     onStatus?: (status: string) => void,
 ): WebSocket {
-    const token = encodeURIComponent(getAdminToken());
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const socket = new WebSocket(
-        `${wsProtocol}//${window.location.host}/bridge/diagnostics/events?token=${token}`,
+        `${wsProtocol}//${window.location.host}/bridge/diagnostics/events`,
     );
 
     socket.onopen = () => {
@@ -659,6 +735,15 @@ export function startPairing(): Promise<PairingStartResponse> {
     });
 }
 
+export function getPairingStatus(
+    pairingId: string,
+): Promise<PairingStatusResponse> {
+    return bridgeRequest<PairingStatusResponse>(
+        `/bridge/pairing/${encodeURIComponent(pairingId)}/status`,
+    );
+}
+
+
 export function getClients(): Promise<ClientsResponse> {
     return bridgeRequest<ClientsResponse>('/bridge/clients');
 }
@@ -667,4 +752,8 @@ export function revokeClient(clientId: string): Promise<unknown> {
     return bridgeRequest<unknown>(`/bridge/clients/${clientId}/revoke`, {
         method: 'POST',
     });
+}
+
+export function getHealth(): Promise<HealthResponse> {
+    return bridgeRequest<HealthResponse>('/bridge/admin/health');
 }

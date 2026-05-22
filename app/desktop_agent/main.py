@@ -1,4 +1,6 @@
+import os
 import time
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -23,7 +25,7 @@ from app.settings import ensure_runtime_dirs
 ensure_runtime_dirs()
 
 app = FastAPI(
-    title="Autocom Desktop Agent",
+    title="Diagnostic Desktop Agent",
     version="0.1.0",
     description="Local-only pywinauto automation agent. Bind only to 127.0.0.1.",
 )
@@ -43,6 +45,11 @@ class ClickTextRequest(BaseModel):
 class ClickPointRequest(BaseModel):
     x: int
     y: int
+
+class EngineLaunchRequest(BaseModel):
+    module: str
+    label: str
+    shortcut_path: str
 
 FULL_WINDOW_REGION = {
     "left_min": 0,
@@ -67,7 +74,7 @@ def classify_screen(win) -> dict:
     if screen_has_any(screen, HARDWARE_SETUP_KEYWORDS):
         return {
             "state": "NEED_VCI_SETUP",
-            "message": "Autocom is blocked by Hardware setup / VCI connection screen.",
+            "message": "Diagnostic engine is waiting for Hardware setup / VCI connection.",
             "available_actions": [
                 "hardware_search_vci",
                 "hardware_test_vci",
@@ -79,7 +86,7 @@ def classify_screen(win) -> dict:
     if screen_has_any(screen, DIAGNOSTIC_READY_KEYWORDS):
         return {
             "state": "READY_FOR_DIAGNOSIS",
-            "message": "Autocom appears to be on diagnostic/function screen.",
+            "message": "Diagnostic engine is ready for diagnostic functions.",
             "available_actions": [
                 "get_capabilities",
                 "get_obd_functions",
@@ -91,7 +98,7 @@ def classify_screen(win) -> dict:
 
     return {
         "state": "UNKNOWN",
-        "message": "Autocom screen was captured but could not be classified yet.",
+        "message": "Diagnostic engine screen was captured but could not be classified yet.",
         "screen": screen,
     }
 
@@ -113,9 +120,9 @@ def require_autocom_window():
         raise HTTPException(
             status_code=404,
             detail={
-                "code": "AUTOCOM_WINDOW_NOT_FOUND",
-                "message": "Autocom window was not found. Open Autocom Cars CDP+ and retry.",
-                "visible_windows": status.get("visible_windows", []),
+                "code": "ENGINE_WINDOW_NOT_FOUND",
+                "message": "Diagnostic engine window was not found. Open the configured engine and retry.",
+                "visible_windows_count": status.get("visible_windows_count", 0),
             },
         )
     return True
@@ -231,3 +238,32 @@ def hardware_test_vci():
         return result
 
     return safe_call(_run)
+
+@app.post("/agent/engine/launch")
+def launch_engine(payload: EngineLaunchRequest):
+    path = Path(payload.shortcut_path)
+
+    if not path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "ENGINE_PATH_NOT_FOUND",
+                "message": "Configured engine shortcut or executable was not found.",
+            },
+        )
+
+    if path.suffix.lower() not in {".lnk", ".exe"}:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_ENGINE_PATH",
+                "message": "Only Windows shortcut or executable paths are supported.",
+            },
+        )
+
+    os.startfile(str(path))
+    return {
+        "launched": True,
+        "module": payload.module,
+        "label": payload.label,
+    }

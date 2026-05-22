@@ -63,7 +63,7 @@ def extract_visible_texts(win):
 
     return {
         "timestamp": datetime.now().isoformat(),
-        "window_title": win.window_text(),
+        "window_detected": True,
         "window_rect": window_rect,
         "text_count": len(texts),
         "texts": texts

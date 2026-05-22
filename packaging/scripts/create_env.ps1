@@ -8,10 +8,6 @@ if (Test-Path $EnvPath) {
     exit 0
 }
 
-$Bytes = New-Object byte[] 32
-[System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($Bytes)
-$Token = "acb_admin_" + [Convert]::ToBase64String($Bytes).Replace("+", "-").Replace("/", "_").Replace("=", "")
-
 $EnvText = @"
 APP_ENV=production
 
@@ -22,7 +18,7 @@ BRIDGE_PUBLIC_HOST=
 AGENT_HOST=127.0.0.1
 AGENT_PORT=8091
 
-API_TOKEN=$Token
+ADMIN_SESSION_TTL_SECONDS=43200
 AUTOCOM_BRIDGE_DATA_DIR=C:/ProgramData/AutocomBridge
 
 AUTOCOM_HOST=localhost

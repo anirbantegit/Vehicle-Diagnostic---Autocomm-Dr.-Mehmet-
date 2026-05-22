@@ -1,4 +1,4 @@
-import React, {useState} from 'react';
+import React, {useEffect, useState} from 'react';
 import Dashboard from './pages/Dashboard';
 import EngineControl from './pages/EngineControl';
 import VehicleSelection from './pages/VehicleSelection';
@@ -6,18 +6,18 @@ import Pairing from './pages/Pairing';
 import Clients from './pages/Clients';
 import DebugLogs from './pages/DebugLogs';
 import Settings from './pages/Settings';
-import {getAdminToken, setAdminToken} from './api/bridgeClient';
+import {bootstrapAdminSession} from './api/bridgeClient';
 
 type PageKey = 'dashboard' | 'vehicle-selection' | 'engine' | 'pairing' | 'clients' | 'logs' | 'settings';
 
 const pages: Array<{ key: PageKey; label: string; description: string }> = [
-    {key: 'dashboard', label: 'Dashboard', description: 'Bridge, Agent, Autocom status'},
+    {key: 'dashboard', label: 'Dashboard', description: 'Bridge, Agent, Engine status'},
     {key: 'vehicle-selection', label: 'Vehicle Selection', description: 'Brands, models, years, variants'},
-    {key: 'engine', label: 'Engine Control', description: 'Screen dump, Generic OBD, VCI, SignalR'},
+    {key: 'engine', label: 'Engine Control', description: 'Runtime control, Generic OBD, VCI, Events'},
     {key: 'pairing', label: 'Pairing', description: 'Device identity and QR pairing'},
     {key: 'clients', label: 'Clients', description: 'Paired devices and revoke access'},
     {key: 'logs', label: 'Super Logs', description: 'Actions, responses, errors, events'},
-    {key: 'settings', label: 'Settings', description: 'Admin token and runtime notes'},
+    {key: 'settings', label: 'Settings', description: 'Local security and runtime notes'},
 ];
 
 const styles: Record<string, React.CSSProperties> = {
@@ -134,18 +134,28 @@ function renderPage(page: PageKey) {
 
 export default function App() {
     const [page, setPage] = useState<PageKey>('dashboard');
-    const [token, setToken] = useState(getAdminToken());
+    const [sessionReady, setSessionReady] = useState(false);
+    const [sessionError, setSessionError] = useState('');
 
-    function handleTokenChange(value: string) {
-        setToken(value);
-        setAdminToken(value);
+    useEffect(() => {
+        bootstrapAdminSession()
+            .then(() => setSessionReady(true))
+            .catch((error: Error) => setSessionError(error.message));
+    }, []);
+
+    if (sessionError) {
+        return <div>Local Admin Console could not be started: {sessionError}</div>;
+    }
+
+    if (!sessionReady) {
+        return <div>Starting secure local console...</div>;
     }
 
     return (
         <main style={styles.shell}>
             <aside style={styles.sidebar}>
                 <div style={styles.brand}>
-                    <h1 style={styles.brandTitle}>Autocom Bridge</h1>
+                    <h1 style={styles.brandTitle}>Diagnostic Engine Console</h1>
                     <p style={styles.brandSub}>
                         React Admin Console for local bridge status, engine-control testing,
                         pairing, and debug operations.
@@ -171,16 +181,6 @@ export default function App() {
                         );
                     })}
                 </nav>
-
-                <div style={styles.tokenBox}>
-                    <div style={styles.tokenLabel}>Admin token</div>
-                    <input
-                        value={token}
-                        onChange={(event) => handleTokenChange(event.target.value)}
-                        placeholder="Paste bridge admin token"
-                        style={styles.tokenInput}
-                    />
-                </div>
             </aside>
 
             <section style={styles.content}>{renderPage(page)}</section>

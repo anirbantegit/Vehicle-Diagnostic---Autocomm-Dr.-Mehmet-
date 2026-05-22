@@ -18,6 +18,13 @@ class ClickPointRequest(BaseModel):
     x: int
     y: int
 
+class EngineProfileRequest(BaseModel):
+    shortcut_path: str
+
+class EngineLaunchRequest(BaseModel):
+    module: str
+    label: str
+    shortcut_path: str
 
 class VehicleSelectionRequest(BaseModel):
     list_type: str

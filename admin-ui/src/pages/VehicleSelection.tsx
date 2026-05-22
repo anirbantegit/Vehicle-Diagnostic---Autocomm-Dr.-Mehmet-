@@ -16,6 +16,7 @@ import {
     VehicleSelectionItem,
     VehicleSelectionResponse,
 } from '../api/bridgeClient';
+import {redactDisplayValue} from "../utils/redactDisplay";
 
 const vehicleSteps: Array<{
     type: VehicleListType;
@@ -85,7 +86,7 @@ function JsonOutput({value}: { value: unknown }) {
                 fontSize: 12,
             }}
         >
-    {JSON.stringify(value, null, 2)}
+    {JSON.stringify(redactDisplayValue(value), null, 2)}
     </pre>
     );
 }
@@ -329,7 +330,7 @@ export default function VehicleSelection() {
             <header style={{marginBottom: 22}}>
                 <h2 style={{margin: 0, fontSize: 28}}>Vehicle Selection</h2>
                 <p style={{color: '#64748b', margin: '6px 0 0', fontSize: 13}}>
-                    Test Autocom brand → model → year → variant flow through Bridge REST APIs.
+                    Test vehicle brand → model → year → variant selection through the diagnostic bridge.
                 </p>
             </header>
 
@@ -453,7 +454,7 @@ export default function VehicleSelection() {
                                 style={button}
                                 onClick={notifyAutocomSelection}
                             >
-                                Notify Selection
+                                Send Selection to Engine
                             </button>
                             <button
                                 type="button"
@@ -563,7 +564,7 @@ export default function VehicleSelection() {
                                 fontSize: 12,
                             }}
                         >
-                            {JSON.stringify(diagnosticEvents, null, 2)}
+                            {JSON.stringify(redactDisplayValue(diagnosticEvents), null, 2)}
                         </pre>
                     </div>
                 </section>

@@ -1,12 +1,5 @@
 import React, {useEffect, useState} from 'react';
-import {
-    BridgeIdentity,
-    BridgeStatus,
-    getAutocomProduct,
-    getBridgeStatus,
-    getPublicIdentity,
-    getSignalrStatus,
-} from '../api/bridgeClient';
+import {getHealth, HealthResponse, HealthState} from '../api/bridgeClient';
 
 const card: React.CSSProperties = {
     background: '#fff',
@@ -37,51 +30,74 @@ const grid: React.CSSProperties = {
     gap: 16,
 };
 
-function JsonBlock({value}: { value: unknown }) {
-    return (
-        <pre
-            style={{
-                margin: 0,
-                marginTop: 12,
-                padding: 14,
-                borderRadius: 14,
-                background: '#0f172a',
-                color: '#dbeafe',
-                overflow: 'auto',
-                maxHeight: 320,
-                fontSize: 12,
-            }}
-        >
-    {JSON.stringify(value, null, 2)}
-    </pre>
-    );
-}
+type HealthCheck = {
+    status: HealthState;
+    message: string;
+};
 
-function StatusBadge({ok}: { ok: boolean }) {
+const healthAppearance: Record<
+    HealthState,
+    {label: string; color: string; background: string}
+> = {
+    healthy: {
+        label: 'Healthy',
+        color: '#166534',
+        background: '#dcfce7',
+    },
+    attention: {
+        label: 'Attention',
+        color: '#92400e',
+        background: '#fef3c7',
+    },
+    blocked: {
+        label: 'Blocked',
+        color: '#991b1b',
+        background: '#fee2e2',
+    },
+};
+
+function HealthCard({title, check}: { title: string; check?: HealthCheck }) {
+    const state = check?.status || 'attention';
+    const appearance = healthAppearance[state];
+
     return (
-        <span
-            style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                borderRadius: 999,
-                padding: '5px 10px',
-                fontSize: 12,
-                fontWeight: 800,
-                color: ok ? '#166534' : '#991b1b',
-                background: ok ? '#dcfce7' : '#fee2e2',
-            }}
-        >
-    {ok ? 'OK' : 'Needs check'}
-    </span>
+        <div style={card}>
+            <div
+                style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    gap: 12,
+                    marginBottom: 12,
+                }}
+            >
+                <h3 style={{margin: 0}}>{title}</h3>
+                <span
+                    style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        borderRadius: 999,
+                        padding: '5px 10px',
+                        fontSize: 12,
+                        fontWeight: 800,
+                        color: appearance.color,
+                        background: appearance.background,
+                    }}
+                >
+                    {appearance.label}
+                </span>
+            </div>
+
+            <p style={{...muted, margin: 0}}>
+                {check?.message || 'Status has not been loaded yet.'}
+            </p>
+        </div>
     );
 }
 
 export default function Dashboard() {
     const [loading, setLoading] = useState(false);
-    const [identity, setIdentity] = useState<BridgeIdentity | null>(null);
-    const [status, setStatus] = useState<BridgeStatus | null>(null);
-    const [product, setProduct] = useState<unknown>(null);
-    const [signalr, setSignalr] = useState<unknown>(null);
+    const [health, setHealth] = useState<HealthResponse | null>(null);
     const [error, setError] = useState('');
 
     async function refresh() {
@@ -89,37 +105,11 @@ export default function Dashboard() {
         setError('');
 
         try {
-            const [identityResult, statusResult, productResult, signalrResult] =
-                await Promise.allSettled([
-                    getPublicIdentity(),
-                    getBridgeStatus(),
-                    getAutocomProduct(),
-                    getSignalrStatus(),
-                ]);
+            setHealth(await getHealth());
 
-            if (identityResult.status === 'fulfilled') {
-                setIdentity(identityResult.value);
-            }
-
-            if (statusResult.status === 'fulfilled') {
-                setStatus(statusResult.value);
-            }
-
-            if (productResult.status === 'fulfilled') {
-                setProduct(productResult.value);
-            } else {
-                setProduct({error: productResult.reason?.message || 'Product API failed'});
-            }
-
-            if (signalrResult.status === 'fulfilled') {
-                setSignalr(signalrResult.value);
-            } else {
-                setSignalr({error: signalrResult.reason?.message || 'SignalR status failed'});
-            }
-
-            if (statusResult.status === 'rejected') {
-                setError(statusResult.reason?.message || 'Bridge status failed');
-            }
+        } catch (exc) {
+            setHealth(null);
+            setError(exc instanceof Error ? exc.message : String(exc));
         } finally {
             setLoading(false);
         }
@@ -129,21 +119,13 @@ export default function Dashboard() {
         refresh();
     }, []);
 
-    const agentFound =
-        Boolean(status
-            &&
-            typeof status.agent === 'object'
-            &&
-            status.agent !== null
-        )
-
 
     return (
         <div>
             <header style={{marginBottom: 22}}>
                 <h2 style={{margin: 0, fontSize: 28}}>Dashboard</h2>
                 <p style={{...muted, margin: '6px 0 0'}}>
-                    Central status for Bridge Service, Desktop Agent, Autocom API, and SignalR.
+                    Central status for Bridge Service, Desktop Agent, Diagnostic Engine and runtime events.
                 </p>
             </header>
 
@@ -169,39 +151,12 @@ export default function Dashboard() {
             }
 
             <section style={grid}>
-                <div style={card}>
-                    <h3 style={{marginTop: 0}}>Bridge Identity</h3>
-                    <StatusBadge ok={Boolean(identity)}/>
-                    <JsonBlock value={identity || {message: 'No identity loaded yet'}}/>
-                </div>
-
-                <div style={card}>
-                    <h3 style={{marginTop: 0}}>Bridge + Desktop Agent</h3>
-                    <StatusBadge ok={Boolean(status && !status.agent_error)}/>
-                    <JsonBlock
-                        value={{
-                            bridge: status?.bridge,
-                            bridge_port: status?.bridge_port,
-                            agent_found: agentFound,
-                            agent_error: status?.agent_error,
-                            agent: status?.agent,
-                        }}
-                    />
-                </div>
-
-                <div style={card}>
-                    <h3 style={{marginTop: 0}}>Autocom Product API</h3>
-                    <StatusBadge ok={Boolean(product && !(product as { error?: string }).error)}/>
-                    <JsonBlock value={product || {message: 'Not loaded'}}/>
-                </div>
-
-                <div style={card}>
-                    <h3 style={{marginTop: 0}}>SignalR Runtime</h3>
-                    <StatusBadge ok={Boolean(signalr && !(signalr as { error?: string }).error)}/>
-                    <JsonBlock value={signalr || {message: 'Not loaded'}}/>
-                </div>
+                <HealthCard title="Bridge Service" check={health?.bridge}/>
+                <HealthCard title="Desktop Agent" check={health?.desktop_agent}/>
+                <HealthCard title="Diagnostic Engine" check={health?.engine}/>
+                <HealthCard title="Mobile Pairing" check={health?.mobile_pairing}/>
+                <HealthCard title="VCI Validation" check={health?.hardware}/>
             </section>
         </div>
-    )
-
+    );
 }

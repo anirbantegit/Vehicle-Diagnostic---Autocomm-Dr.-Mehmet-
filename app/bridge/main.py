@@ -1,9 +1,6 @@
 import asyncio
-import hmac
-
 import requests
-from fastapi import Depends, FastAPI, Header, HTTPException, Security, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, Security, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
@@ -12,6 +9,7 @@ from pydantic import BaseModel, Field
 from app.autocom.rest_client import AutocomRestClient
 from app.autocom.signalr_legacy import ClassicSignalRClient
 from app.bridge.schemas import (
+    EngineProfileRequest,
     FavouriteRequest,
     PairingClaimRequest,
     RunDiagnosisRequest,
@@ -20,36 +18,33 @@ from app.bridge.schemas import (
 )
 from app.device.clients import list_clients, revoke_client, verify_client_token
 from app.device.identity import public_identity
-from app.device.pairing import claim_pairing, start_pairing
+from app.device.pairing import claim_pairing, get_pairing_status, start_pairing
+from app.security.admin_auth import (
+    create_admin_session,
+    get_or_create_admin_secret,
+    revoke_admin_session,
+    validate_admin_session,
+)
 from app.settings import ensure_runtime_dirs, settings
+from app.engine.profiles import ENGINE_LABELS, list_engine_profiles, save_engine_profile
 
 
 ensure_runtime_dirs()
+get_or_create_admin_secret()
 
 rest_client = AutocomRestClient()
 signalr_client = ClassicSignalRClient()
 
 app = FastAPI(
-    title="Autocom Bridge Server",
+    title="Diagnostic Bridge Service",
     version="0.1.0",
-    description="LAN bridge server. API/SignalR first, Desktop Agent for automation.",
-    swagger_ui_parameters={
-        "persistAuthorization": True,
-    },
+    description="Local diagnostic bridge service and desktop automation gateway.",
 )
 
 bridge_auth_scheme = HTTPBearer(
     auto_error=False,
-    scheme_name="BridgeBearerAuth",
-    description="Paste only the bridge API token, for example: change-me-dev-token",
-)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    scheme_name="PairedDeviceBearerAuth",
+    description="Bearer token issued only to a paired mobile client.",
 )
 
 admin_assets_dir = settings.web_admin_dist_dir / "assets"
@@ -119,25 +114,31 @@ def extract_bearer_token(
     return None
 
 
-def is_admin_token(token: str | None) -> bool:
-    if not settings.api_token:
-        return True
-    return bool(token) and hmac.compare_digest(token, settings.api_token)
+def require_loopback(request: Request) -> None:
+    host = request.client.host if request.client else ""
+    if host not in {"127.0.0.1", "::1"}:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "LOCAL_ADMIN_ONLY",
+                "message": "The Admin Console is available only from this computer.",
+            },
+        )
 
 
-def require_admin_token(
-    credentials: HTTPAuthorizationCredentials | None = Security(bridge_auth_scheme),
-    authorization: str | None = Header(default=None, include_in_schema=False),
-):
-    supplied_token = extract_bearer_token(credentials, authorization)
+def require_admin_session(
+    request: Request,
+    x_csrf_token: str | None = Header(default=None, alias="X-CSRF-Token"),
+) -> dict:
+    require_loopback(request)
+    cookie_value = request.cookies.get(settings.admin_session_cookie_name)
 
-    if not is_admin_token(supplied_token):
+    if not validate_admin_session(cookie_value, x_csrf_token, require_csrf=True):
         raise HTTPException(
             status_code=401,
             detail={
-                "code": "INVALID_BRIDGE_ADMIN_TOKEN",
-                "message": "Invalid or missing bridge admin token.",
-                "expected_header": "Authorization: Bearer <admin-token>",
+                "code": "INVALID_ADMIN_SESSION",
+                "message": "Local Admin Console session is missing or expired.",
             },
         )
 
@@ -145,13 +146,16 @@ def require_admin_token(
 
 
 def require_token(
+    request: Request,
     credentials: HTTPAuthorizationCredentials | None = Security(bridge_auth_scheme),
     authorization: str | None = Header(default=None, include_in_schema=False),
+    x_csrf_token: str | None = Header(default=None, alias="X-CSRF-Token"),
 ):
-    supplied_token = extract_bearer_token(credentials, authorization)
-
-    if is_admin_token(supplied_token):
+    admin_cookie = request.cookies.get(settings.admin_session_cookie_name)
+    if validate_admin_session(admin_cookie, x_csrf_token, require_csrf=True):
         return {"type": "admin"}
+
+    supplied_token = extract_bearer_token(credentials, authorization)
 
     client = verify_client_token(supplied_token or "")
     if client:
@@ -161,8 +165,8 @@ def require_token(
         status_code=401,
         detail={
             "code": "INVALID_BRIDGE_TOKEN",
-            "message": "Invalid or missing bridge token.",
-            "expected_header": "Authorization: Bearer <admin-or-client-token>",
+            "message": "Invalid local admin session or paired-device token.",
+            "expected_header": "Authorization: Bearer <paired-device-token>",
         },
     )
 
@@ -219,9 +223,39 @@ def autocom_get(path: str):
 def bridge_public_identity():
     return public_identity()
 
+@app.post("/bridge/admin/session")
+def bridge_admin_session(response: Response, request: Request):
+    require_loopback(request)
+    session = create_admin_session()
+    response.set_cookie(
+        key=settings.admin_session_cookie_name,
+        value=session["cookie_value"],
+        httponly=True,
+        samesite="strict",
+        secure=False,
+        max_age=settings.admin_session_ttl_seconds,
+        path="/",
+    )
+    return {
+        "authenticated": True,
+        "csrf_token": session["csrf_token"],
+        "expires_at": session["expires_at"],
+    }
+
+
+@app.delete("/bridge/admin/session")
+def bridge_admin_logout(
+    response: Response,
+    request: Request,
+    _: dict = Depends(require_admin_session),
+):
+    revoke_admin_session(request.cookies.get(settings.admin_session_cookie_name))
+    response.delete_cookie(settings.admin_session_cookie_name, path="/")
+    return {"authenticated": False}
+
 
 @app.post("/bridge/pairing/start")
-def bridge_pairing_start(_: dict = Depends(require_admin_token)):
+def bridge_pairing_start(_: dict = Depends(require_admin_session)):
     return start_pairing()
 
 
@@ -247,12 +281,12 @@ def bridge_pairing_claim(payload: PairingClaimRequest):
 
 
 @app.get("/bridge/clients")
-def bridge_clients(_: dict = Depends(require_admin_token)):
+def bridge_clients(_: dict = Depends(require_admin_session)):
     return {"clients": list_clients()}
 
 
 @app.post("/bridge/clients/{client_id}/revoke")
-def bridge_revoke_client(client_id: str, _: dict = Depends(require_admin_token)):
+def bridge_revoke_client(client_id: str, _: dict = Depends(require_admin_session)):
     revoked = revoke_client(client_id)
     if not revoked:
         raise HTTPException(
@@ -442,7 +476,14 @@ def run_diagnosis(payload: RunDiagnosisRequest, _: bool = Depends(require_token)
 
 @app.websocket("/bridge/diagnostics/events")
 async def diagnostics_events(websocket: WebSocket, token: str | None = None):
-    if settings.api_token and not is_admin_token(token) and not verify_client_token(token or ""):
+    admin_cookie = websocket.cookies.get(settings.admin_session_cookie_name)
+    local_admin_session = validate_admin_session(
+        admin_cookie,
+        require_csrf=False,
+    )
+    paired_mobile_client = verify_client_token(token or "")
+
+    if not local_admin_session and not paired_mobile_client:
         await websocket.close(code=1008)
         return
 
@@ -461,3 +502,106 @@ async def diagnostics_events(websocket: WebSocket, token: str | None = None):
                 await asyncio.sleep(0.1)
     except WebSocketDisconnect:
         return
+
+@app.get("/bridge/admin/health")
+def bridge_admin_health(_: dict = Depends(require_admin_session)):
+    agent_status = None
+    agent_error = None
+
+    try:
+        agent_status = agent_request("GET", "/agent/status", timeout=3)
+    except HTTPException as exc:
+        agent_error = exc.detail
+
+    active_clients = [
+        client for client in list_clients()
+        if not client.get("revoked")
+    ]
+
+    window = (agent_status or {}).get("window") or {}
+    engine_detected = bool(window.get("found"))
+    agent_running = agent_status is not None and agent_error is None
+
+    if not agent_running:
+        overall = "blocked"
+    elif not engine_detected or not active_clients:
+        overall = "attention"
+    else:
+        overall = "healthy"
+
+    return {
+        "overall": overall,
+        "bridge": {
+            "status": "healthy",
+            "message": "Bridge service is running.",
+        },
+        "desktop_agent": {
+            "status": "healthy" if agent_running else "blocked",
+            "message": "Desktop agent is reachable." if agent_running else "Desktop agent is unavailable.",
+        },
+        "engine": {
+            "status": "healthy" if engine_detected else "attention",
+            "detected": engine_detected,
+            "engine_label": window.get("engine_label"),
+            "message": "Configured engine detected." if engine_detected else "Open or configure an engine target.",
+        },
+        "mobile_pairing": {
+            "status": "healthy" if active_clients else "attention",
+            "active_devices": len(active_clients),
+            "message": "Mobile device paired." if active_clients else "No active mobile device is paired.",
+        },
+        "hardware": {
+            "status": "attention",
+            "verification": "pending",
+            "message": "VCI and real-vehicle diagnostic validation must be completed with physical hardware.",
+        },
+    }
+
+@app.get("/bridge/admin/engine-profiles")
+def bridge_engine_profiles(_: dict = Depends(require_admin_session)):
+    return {"profiles": list_engine_profiles()}
+
+
+@app.put("/bridge/admin/engine-profiles/{module}")
+def bridge_save_engine_profile(
+    module: str,
+    payload: EngineProfileRequest,
+    _: dict = Depends(require_admin_session),
+):
+    try:
+        return save_engine_profile(module, payload.shortcut_path)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": str(exc), "message": "Unable to save engine configuration."},
+        )
+
+
+@app.post("/bridge/admin/engine-profiles/{module}/launch")
+def bridge_launch_engine(module: str, _: dict = Depends(require_admin_session)):
+    profile = next(
+        (profile for profile in list_engine_profiles() if profile["module"] == module),
+        None,
+    )
+    if not profile or not profile["configured"]:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "ENGINE_NOT_CONFIGURED", "message": "Configure this engine first."},
+        )
+
+    return agent_request(
+        "POST",
+        "/agent/engine/launch",
+        {
+            "module": module,
+            "label": ENGINE_LABELS[module],
+            "shortcut_path": profile["shortcut_path"],
+        },
+    )
+
+@app.get("/bridge/pairing/{pairing_id}/status")
+def bridge_pairing_status(
+    pairing_id: str,
+    _: dict = Depends(require_admin_session),
+):
+    return get_pairing_status(pairing_id)

@@ -14,6 +14,7 @@ import {
     startGenericObd,
     testVci,
 } from '../api/bridgeClient';
+import {redactDisplayValue} from "../utils/redactDisplay";
 
 const panel: React.CSSProperties = {
     background: '#fff',
@@ -68,7 +69,7 @@ function JsonOutput({value}: { value: unknown }) {
                 fontSize: 12,
             }}
         >
-    {JSON.stringify(value, null, 2)}
+    {JSON.stringify(redactDisplayValue(value), null, 2)}
     </pre>
     );
 }
@@ -76,7 +77,7 @@ function JsonOutput({value}: { value: unknown }) {
 export default function EngineControl() {
     const [busy, setBusy] = useState('');
     const [output, setOutput] = useState<unknown>({
-        message: 'Use the controls to verify engine-level Autocom control.',
+        message: 'Use the controls to verify diagnostic engine connectivity.',
     });
     const [error, setError] = useState('');
     const [signalEvent, setSignalEvent] = useState('runDiagnosis');
@@ -180,7 +181,7 @@ export default function EngineControl() {
             <header style={{marginBottom: 22}}>
                 <h2 style={{margin: 0, fontSize: 28}}>Engine Control</h2>
                 <p style={{color: '#64748b', margin: '6px 0 0', fontSize: 13}}>
-                    First target: prove Bridge → Desktop Agent → Autocom control before mobile UI.
+                    Verify Bridge → Desktop Agent → Diagnostic Engine control before mobile testing.
                 </p>
             </header>
 
@@ -270,7 +271,7 @@ export default function EngineControl() {
                         <h3 style={{marginTop: 0}}>UI Click Calibration</h3>
                         <p style={{color: '#64748b', fontSize: 13}}>
                             Use this when Generic OBD does not click the expected sidebar/menu item.
-                            Coordinates are relative to the Autocom window.
+                            Coordinates are relative to the detected diagnostic engine window.
                         </p>
 
                         <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10}}>
@@ -334,7 +335,7 @@ export default function EngineControl() {
                     <div style={panel}>
                         <h3 style={{marginTop: 0}}>Visible Screen Elements</h3>
                         <p style={{color: '#64748b', fontSize: 13}}>
-                            Fetch UIA elements from the Autocom window, filter them, and click the center point of any visible element.
+                            Fetch visible diagnostic engine elements, filter them, and test selected actions.
                         </p>
 
                         <div style={{display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 10}}>

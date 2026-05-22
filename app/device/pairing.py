@@ -22,7 +22,7 @@ def cleanup_expired_pairings() -> None:
     expired_ids = [
         pairing_id
         for pairing_id, session in _pairing_sessions.items()
-        if session["expires_at_dt"] <= now or session.get("claimed")
+        if session["expires_at_dt"] <= now
     ]
     for pairing_id in expired_ids:
         _pairing_sessions.pop(pairing_id, None)
@@ -48,12 +48,11 @@ def start_pairing() -> dict:
 
     return {
         "pairing_id": pairing_id,
-        "pairing_secret": pairing_secret,
         "expires_in": PAIRING_TTL_SECONDS,
         "expires_at": session["expires_at"],
         "qr_payload": {
             "v": 1,
-            "type": "autocom_bridge_pairing",
+            "type": "diagnostic_bridge_pairing",
             "device_id": identity["device_id"],
             "device_name": identity["device_name"],
             "base_url": get_bridge_base_url(),
@@ -79,8 +78,10 @@ def claim_pairing(pairing_id: str, pairing_secret: str, client_name: str, client
 
     session["claimed"] = True
     client = create_client(client_name=client_name, client_type=client_type)
+    session["client_id"] = client["client_id"]
+    session["client_name"] = client["client_name"]
+    session.pop("pairing_secret", None)
     identity = public_identity()
-    _pairing_sessions.pop(pairing_id, None)
 
     return {
         "device_id": identity["device_id"],
@@ -90,4 +91,26 @@ def claim_pairing(pairing_id: str, pairing_secret: str, client_name: str, client
         "access_token": client["access_token"],
         "base_url": get_bridge_base_url(),
         "paired_at": client["paired_at"],
+    }
+
+
+def get_pairing_status(pairing_id: str) -> dict:
+    cleanup_expired_pairings()
+    session = _pairing_sessions.get(pairing_id)
+
+    if not session:
+        return {"pairing_id": pairing_id, "status": "expired"}
+
+    if session.get("claimed"):
+        return {
+            "pairing_id": pairing_id,
+            "status": "claimed",
+            "client_id": session.get("client_id"),
+            "client_name": session.get("client_name"),
+        }
+
+    return {
+        "pairing_id": pairing_id,
+        "status": "pending",
+        "expires_at": session["expires_at"],
     }
