@@ -1,4 +1,3 @@
-import os
 from app.settings import settings
 
 ROOT_DIR = settings.root_dir
@@ -41,9 +40,6 @@ DIAGNOSTIC_READY_KEYWORDS = [
     "Functions",
 ]
 
-# Autocom local backend discovered from Angular frontend:
-# http://localhost:{port}/api
-# http://localhost:{port + 1}/signalr
-AUTOCOM_HOST = os.getenv("AUTOCOM_HOST", "localhost")
-AUTOCOM_HTTP_PORT = int(os.getenv("AUTOCOM_HTTP_PORT", "9000"))
-AUTOCOM_SIGNALR_PORT = int(os.getenv("AUTOCOM_SIGNALR_PORT", str(AUTOCOM_HTTP_PORT + 1)))
+AUTOCOM_HOST = settings.autocom_host
+AUTOCOM_HTTP_PORT = settings.autocom_http_port
+AUTOCOM_SIGNALR_PORT = settings.autocom_signalr_port

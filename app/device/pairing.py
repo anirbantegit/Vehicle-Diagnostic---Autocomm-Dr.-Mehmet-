@@ -1,3 +1,4 @@
+import hmac
 import secrets
 from datetime import datetime, timedelta, timezone
 
@@ -73,7 +74,7 @@ def claim_pairing(pairing_id: str, pairing_secret: str, client_name: str, client
     if session.get("claimed"):
         raise ValueError("PAIRING_ALREADY_CLAIMED")
 
-    if pairing_secret != session.get("pairing_secret"):
+    if not hmac.compare_digest(pairing_secret, session.get("pairing_secret", "")):
         raise ValueError("INVALID_PAIRING_SECRET")
 
     session["claimed"] = True

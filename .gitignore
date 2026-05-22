@@ -3,3 +3,16 @@
 /Autocomm.iml
 /fetch_source.sh
 /admin-ui/node_modules/
+/build/
+/dist/
+/AutocomBridgeService.spec
+/AutocomDesktopAgent.spec
+
+.env
+.env.localprod
+
+__pycache__/
+*.py[cod]
+/storage/
+
+/app/web_admin/dist/

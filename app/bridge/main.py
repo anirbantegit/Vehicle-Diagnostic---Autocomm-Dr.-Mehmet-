@@ -137,7 +137,7 @@ def require_admin_token(
             detail={
                 "code": "INVALID_BRIDGE_ADMIN_TOKEN",
                 "message": "Invalid or missing bridge admin token.",
-                "expected_header": "Authorization: Bearer \u003cadmin-token\u003e",
+                "expected_header": "Authorization: Bearer <admin-token>",
             },
         )
 
@@ -162,7 +162,7 @@ def require_token(
         detail={
             "code": "INVALID_BRIDGE_TOKEN",
             "message": "Invalid or missing bridge token.",
-            "expected_header": "Authorization: Bearer \u003cadmin-or-client-token\u003e",
+            "expected_header": "Authorization: Bearer <admin-or-client-token>",
         },
     )
 
@@ -451,7 +451,7 @@ async def diagnostics_events(websocket: WebSocket, token: str | None = None):
 
     try:
         while True:
-            event = signalr_client.wait_event(timeout=0.5)
+            event = await asyncio.to_thread(signalr_client.wait_event, 0.5)
             if event is not None:
                 await websocket.send_json({
                     "event": event.event,

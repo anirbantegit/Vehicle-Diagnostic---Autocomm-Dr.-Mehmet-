@@ -4,14 +4,23 @@ from pathlib import Path
 import uvicorn
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
+
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from app.settings import settings
+from app.bridge.main import app as bridge_app
+from app.settings import settings, validate_runtime_settings
 
 
 def main():
-    uvicorn.run("app.bridge.main:app", host=settings.bridge_host, port=settings.bridge_port, reload=False)
+    validate_runtime_settings()
+    print(f"Loaded env file: {settings.loaded_env_file}")
+    uvicorn.run(
+        bridge_app,
+        host=settings.bridge_host,
+        port=settings.bridge_port,
+        reload=False,
+    )
 
 
 if __name__ == "__main__":
