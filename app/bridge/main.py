@@ -13,8 +13,11 @@ from app.bridge.schemas import (
     FavouriteRequest,
     PairingClaimRequest,
     RunDiagnosisRequest,
+    RtdFunctionOpenRequest,
     SignalRSendRequest,
+    VehicleContextRequest,
     VehicleSelectionRequest,
+    VinSelectionRequest,
 )
 from app.device.clients import list_clients, revoke_client, verify_client_token
 from app.device.identity import public_identity
@@ -101,6 +104,7 @@ class NativeControlRequest(BaseModel):
     action: str = "invoke"
     present: bool = True
     timeout_seconds: float = Field(default=5.0, ge=0.1, le=30.0)
+    fallback_window_handle: int | None = None
 
 
 class RtdOpenRequest(BaseModel):
@@ -111,11 +115,13 @@ class RtdOpenRequest(BaseModel):
 
 class RtdPopupActionRequest(BaseModel):
     window_handle: int
+    fallback_window_handle: int | None = None
     action: str
 
 
 class RtdLocationRequest(BaseModel):
     window_handle: int
+    fallback_window_handle: int | None = None
     location_text: str = Field(min_length=1)
 
 
@@ -202,6 +208,65 @@ def safe_call(fn, *args, **kwargs):
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+VEHICLE_LIST_TYPES = {
+    "brands",
+    "models",
+    "years",
+    "systemTypes",
+    "engines",
+    "systems",
+    "gearboxes",
+    "equipments",
+}
+
+
+def require_vehicle_list_type(list_type: str) -> str:
+    if list_type not in VEHICLE_LIST_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_VEHICLE_LIST_TYPE",
+                "message": "Unsupported vehicle-selection list type.",
+            },
+        )
+    return list_type
+
+
+def require_vehicle_definition_id(vehicle_definition_id: str) -> str:
+    clean_id = vehicle_definition_id.strip()
+    if not clean_id:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "VEHICLE_DEFINITION_REQUIRED",
+                "message": "Select a vehicle context before running this action.",
+            },
+        )
+    return clean_id
+
+
+def normalize_vin(vin: str) -> str:
+    raw_vin = "".join(vin.split()).upper()
+    if len(raw_vin) not in {0, 3, 17}:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_VIN_LENGTH",
+                "message": "VIN lookup accepts a three-character WMI prefix or a complete 17-character VIN.",
+            },
+        )
+
+    if not raw_vin:
+        return ""
+
+    if len(raw_vin) == 3:
+        # Match the recovered frontend: once the WMI is entered it sends the
+        # three VIN characters followed by the display separator.
+        return f"{raw_vin} "
+
+    return f"{raw_vin[:3]} {raw_vin[3:11]} {raw_vin[11:]}"
 
 
 def agent_request(method: str, path: str, json_body=None, timeout: int = 15):
@@ -362,8 +427,17 @@ def bridge_trace_windows(_: dict = Depends(require_admin_session)):
 
 
 @app.get("/bridge/admin/trace/windows/{window_handle}/screen")
-def bridge_trace_window_screen(window_handle: int, _: dict = Depends(require_admin_session)):
-    return agent_request("GET", f"/agent/trace/windows/{window_handle}/screen", timeout=30)
+def bridge_trace_window_screen(
+    window_handle: int,
+    include_preview: bool = True,
+    _: dict = Depends(require_admin_session),
+):
+    preview_query = "" if include_preview else "?include_preview=false"
+    return agent_request(
+        "GET",
+        f"/agent/trace/windows/{window_handle}/screen{preview_query}",
+        timeout=30,
+    )
 
 
 @app.post("/bridge/admin/trace/windows/{window_handle}/click-point")
@@ -411,10 +485,15 @@ def bridge_trace_window_control_action(
 def bridge_open_rtd_popup(payload: RtdOpenRequest, _: dict = Depends(require_admin_session)):
     sent = safe_call(signalr_client.send, "viewRTDHelpDocument", payload.rtd_index)
 
+    # The RTD form is opened as its own native top-level window. Locate the
+    # window created by the source engine process instead of searching only
+    # beneath the original main-window HWND.
     popup_screen = agent_request(
         "POST",
-        f"/agent/trace/windows/{payload.window_handle}/wait-control",
+        "/agent/trace/find-window-control",
         {
+            "source_window_handle": payload.window_handle,
+            "same_process": True,
             "automation_id": "FormOBDFunction",
             "control_type": "Window",
             "present": True,
@@ -422,9 +501,10 @@ def bridge_open_rtd_popup(payload: RtdOpenRequest, _: dict = Depends(require_adm
         },
         timeout=35,
     )
+    popup_window_handle = popup_screen["window"]["handle"]
     run_screen = agent_request(
         "POST",
-        f"/agent/trace/windows/{payload.window_handle}/wait-control",
+        f"/agent/trace/windows/{popup_window_handle}/wait-control",
         {
             "automation_id": "autocomButtonPlay",
             "control_type": "Button",
@@ -439,6 +519,7 @@ def bridge_open_rtd_popup(payload: RtdOpenRequest, _: dict = Depends(require_adm
         "sent": sent,
         "confirmed": True,
         "confirmation": "Native RTD popup and Run button were detected through UI Automation.",
+        "popup_window_handle": popup_window_handle,
         "popup": popup_screen["matched_control"],
         "run_button": run_screen["matched_control"],
         "screen": run_screen,
@@ -474,6 +555,7 @@ def bridge_rtd_popup_action(
             "control_type": "Button",
             "parent_automation_id": "FormOBDFunction",
             "action": "invoke",
+            "fallback_window_handle": payload.fallback_window_handle,
         },
         timeout=30,
     )
@@ -492,6 +574,7 @@ def bridge_rtd_select_location(
             "control_type": "ListItem",
             "parent_automation_id": "listBoxLocations",
             "action": "select",
+            "fallback_window_handle": payload.fallback_window_handle,
         },
         timeout=30,
     )
@@ -590,17 +673,85 @@ def rtd_functions(vehicle_definition_id: str, protocol: str | None = None, _: bo
 
 @app.get("/bridge/vehicles/{list_type}")
 def vehicle_selection_root(list_type: str, _: bool = Depends(require_token)):
-    return autocom_get(f"/vehicleselection/{list_type}/")
+    valid_type = require_vehicle_list_type(list_type)
+    return safe_call(rest_client.get_vehicle_selection, valid_type, "")
 
 
 @app.get("/bridge/vehicles/{list_type}/{vehicle_id}")
 def vehicle_selection(list_type: str, vehicle_id: str, _: bool = Depends(require_token)):
-    return autocom_get(f"/vehicleselection/{list_type}/{vehicle_id}")
+    valid_type = require_vehicle_list_type(list_type)
+    return safe_call(rest_client.get_vehicle_selection, valid_type, vehicle_id)
 
 
 @app.post("/bridge/vehicles/select")
 def vehicle_selection_post(payload: VehicleSelectionRequest, _: bool = Depends(require_token)):
-    return safe_call(rest_client.get_vehicle_selection, payload.list_type, payload.vehicle_id)
+    valid_type = require_vehicle_list_type(payload.list_type)
+    return safe_call(rest_client.get_vehicle_selection, valid_type, payload.vehicle_id)
+
+
+@app.post("/bridge/admin/vehicles/activate")
+def admin_activate_vehicle_context(payload: VehicleContextRequest, _: dict = Depends(require_admin_session)):
+    vehicle_definition_id = require_vehicle_definition_id(payload.vehicle_definition_id)
+    sent = safe_call(signalr_client.send, "carSelectionChanged", vehicle_definition_id)
+    return {
+        "active_vehicle_definition_id": vehicle_definition_id,
+        "sent": sent,
+    }
+
+
+@app.post("/bridge/admin/vehicles/rtd/open")
+def admin_open_vehicle_rtd(payload: RtdFunctionOpenRequest, _: dict = Depends(require_admin_session)):
+    vehicle_definition_id = require_vehicle_definition_id(payload.vehicle_definition_id)
+    selection_sent = safe_call(signalr_client.send, "carSelectionChanged", vehicle_definition_id)
+    functions = safe_call(rest_client.get_rtd_functions, vehicle_definition_id, payload.protocol)
+
+    if not isinstance(functions, list):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "RTD_FUNCTION_LIST_UNAVAILABLE",
+                "message": "Autocom did not return an RTD function list for the active vehicle context.",
+            },
+        )
+
+    selected_function = next(
+        (
+            item for item in functions
+            if isinstance(item, dict) and str(item.get("index")) == str(payload.rtd_index)
+        ),
+        None,
+    )
+    if selected_function is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "RTD_FUNCTION_NOT_FOUND",
+                "message": "The selected RTD function does not belong to the active vehicle context.",
+            },
+        )
+
+    popup_sent = safe_call(signalr_client.send, "viewRTDHelpDocument", payload.rtd_index)
+    return {
+        "active_vehicle_definition_id": vehicle_definition_id,
+        "rtd_function": selected_function,
+        "selection_sent": selection_sent,
+        "popup_sent": popup_sent,
+    }
+
+
+@app.post("/bridge/admin/vin/select")
+def admin_select_vin(payload: VinSelectionRequest, _: dict = Depends(require_admin_session)):
+    formatted_vin = normalize_vin(payload.vin)
+    sent = safe_call(signalr_client.send, "setVin", formatted_vin)
+    return {
+        "vin": formatted_vin,
+        "sent": sent,
+    }
+
+
+@app.post("/bridge/admin/vin/read")
+def admin_read_vin(_: dict = Depends(require_admin_session)):
+    return safe_call(signalr_client.send, "runVinCheck")
 
 
 @app.get("/bridge/limitations/can-erase-faultcodes")

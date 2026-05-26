@@ -7,7 +7,7 @@ type NavigationItem = {
 };
 
 const debugItems: NavigationItem[] = [
-    {to: '/debug/vehicle', label: 'Vehicle & RTD Test', description: 'Vehicle path, capabilities, RTD functions'},
+    {to: '/debug/vehicle', label: 'Vehicle Selection', description: 'Manual/VIN context, guide, OBD and RTD'},
     {to: '/debug/engine', label: 'Engine Runtime', description: 'SignalR, native UI tracing, hardware'},
     {to: '/debug/logs', label: 'Super Logs', description: 'Requests, responses, events'},
     {to: '/debug/runtime-notes', label: 'Runtime Notes', description: 'Local security and commands'},

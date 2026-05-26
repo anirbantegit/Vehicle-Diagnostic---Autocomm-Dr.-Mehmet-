@@ -179,6 +179,8 @@ function canMapControl(control: TraceControlItem, screen: TraceScreenResponse): 
 export default function TraceRecorder() {
     const [windows, setWindows] = useState<TraceWindow[]>([]);
     const [selectedHandle, setSelectedHandle] = useState<number | null>(null);
+    const [rtdSourceHandle, setRtdSourceHandle] = useState<number | null>(null);
+    const [rtdPopupHandle, setRtdPopupHandle] = useState<number | null>(null);
     const [screen, setScreen] = useState<TraceScreenResponse | null>(null);
     const [steps, setSteps] = useState<TraceStep[]>([]);
     const [recording, setRecording] = useState<boolean>(false);
@@ -205,7 +207,10 @@ export default function TraceRecorder() {
         const existing = keepSelection
             ? response.windows.find((window) => window.handle === selectedHandle)
             : undefined;
-        const nextWindow = existing || response.windows.find((window) => window.engine_candidate) || response.windows[0];
+        const engineWindow = response.windows.find((window) => window.engine_candidate);
+        const nextWindow = existing && (existing.engine_candidate || existing.handle === rtdPopupHandle)
+            ? existing
+            : engineWindow || existing || response.windows[0];
 
         if (nextWindow && nextWindow.handle !== selectedHandle) {
             setSelectedHandle(nextWindow.handle);
@@ -214,7 +219,7 @@ export default function TraceRecorder() {
     }
 
     async function fetchScreen(windowHandle: number): Promise<TraceScreenResponse> {
-        const response = await fetchTraceScreen(windowHandle).unwrap();
+        const response = await fetchTraceScreen({windowHandle}).unwrap();
         setScreen(response);
         fingerprintRef.current = screenFingerprint(response);
         return response;
@@ -226,6 +231,22 @@ export default function TraceRecorder() {
         setError('');
         try {
             await fetchScreen(windowHandle);
+        } catch (exc) {
+            setError(errorMessage(exc));
+        } finally {
+            setBusy('');
+        }
+    }
+
+    async function detectWindows(): Promise<void> {
+        setBusy('windows');
+        setError('');
+        try {
+            const availableWindows = await refreshWindows(false);
+            const engineWindow = availableWindows.find((window) => window.engine_candidate) || availableWindows[0];
+            if (engineWindow) {
+                await selectWindow(engineWindow.handle);
+            }
         } catch (exc) {
             setError(errorMessage(exc));
         } finally {
@@ -308,10 +329,22 @@ export default function TraceRecorder() {
         actionData: Record<string, unknown>,
     ): void {
         setScreen(snapshot);
+        setSelectedHandle(snapshot.window.handle);
         fingerprintRef.current = screenFingerprint(snapshot);
-        if (snapshot.windows) {
-            setWindows(snapshot.windows);
-        }
+        setWindows((current) => {
+            const candidates = snapshot.windows || current;
+            const exists = candidates.some(
+                (candidate) => candidate.handle === snapshot.window.handle,
+            );
+
+            return exists
+                ? candidates.map((candidate) =>
+                    candidate.handle === snapshot.window.handle
+                        ? snapshot.window
+                        : candidate,
+                )
+                : [snapshot.window, ...candidates];
+        });
         if (recording) {
             setSteps((current) => [
                 ...current,
@@ -321,10 +354,12 @@ export default function TraceRecorder() {
     }
 
     async function openConfirmedRtdPopup(): Promise<void> {
-        if (selectedHandle === null) {
-            setError('Select the Diagnostic Engine window first.');
+        const selectedWindow = windows.find((window) => window.handle === selectedHandle);
+        if (selectedHandle === null || !selectedWindow?.engine_candidate) {
+            setError('Select the detected Diagnostic Engine window before opening an RTD popup.');
             return;
         }
+        const sourceWindowHandle = selectedHandle;
         const index = Number(rtdIndex);
         if (!Number.isInteger(index)) {
             setError('RTD index must be a valid integer.');
@@ -333,8 +368,10 @@ export default function TraceRecorder() {
         setBusy('rtd-open');
         setError('');
         try {
-            const response = await openRtdPopup({windowHandle: selectedHandle, rtdIndex: index}).unwrap();
-            setAutomationResult(`Confirmed popup: ${response.popup.automation_id}; Run: ${response.run_button.automation_id}`);
+            const response = await openRtdPopup({windowHandle: sourceWindowHandle, rtdIndex: index}).unwrap();
+            setRtdSourceHandle(sourceWindowHandle);
+            setRtdPopupHandle(response.popup_window_handle);
+            setAutomationResult(`Confirmed popup HWND ${response.popup_window_handle}: ${response.popup.automation_id}; Run: ${response.run_button.automation_id}`);
             acceptAutomatedScreen(response.screen, 'signalr-confirmed', {
                 command: 'viewRTDHelpDocument',
                 rtd_index: index,
@@ -348,13 +385,21 @@ export default function TraceRecorder() {
     }
 
     async function executeRtdPopupAction(action: 'run' | 'select_vehicle' | 'help' | 'cancel'): Promise<void> {
-        if (selectedHandle === null) {
+        if (rtdPopupHandle === null) {
+            setError('Open and confirm the RTD popup before executing a popup action.');
             return;
         }
         setBusy(`rtd-${action}`);
         setError('');
         try {
-            const snapshot = await invokeRtdAction({windowHandle: selectedHandle, action}).unwrap();
+            const snapshot = await invokeRtdAction({
+                windowHandle: rtdPopupHandle,
+                fallbackWindowHandle: rtdSourceHandle ?? undefined,
+                action,
+            }).unwrap();
+            if (snapshot.target_window_closed || action === 'cancel') {
+                setRtdPopupHandle(null);
+            }
             setAutomationResult(`RTD popup action completed in background: ${action}`);
             acceptAutomatedScreen(snapshot, 'native-action', {source: 'native-uia', action});
         } catch (exc) {
@@ -365,14 +410,18 @@ export default function TraceRecorder() {
     }
 
     async function selectPopupLocation(): Promise<void> {
-        if (selectedHandle === null || !locationText.trim()) {
-            setError('Select a window and provide a location row text.');
+        if (rtdPopupHandle === null || !locationText.trim()) {
+            setError('Open and confirm the RTD popup, then provide a location row text.');
             return;
         }
         setBusy('rtd-select-location');
         setError('');
         try {
-            const snapshot = await selectLocation({windowHandle: selectedHandle, locationText: locationText.trim()}).unwrap();
+            const snapshot = await selectLocation({
+                windowHandle: rtdPopupHandle,
+                fallbackWindowHandle: rtdSourceHandle ?? undefined,
+                locationText: locationText.trim(),
+            }).unwrap();
             setAutomationResult(`Selected RTD location in background: ${locationText.trim()}`);
             acceptAutomatedScreen(snapshot, 'native-action', {source: 'native-uia', action: 'select-location', text: locationText.trim()});
         } catch (exc) {
@@ -479,16 +528,7 @@ export default function TraceRecorder() {
     }
 
     useEffect(() => {
-        setBusy('windows');
-        refreshWindows(false)
-            .then((availableWindows) => {
-                const first = availableWindows.find((window) => window.engine_candidate) || availableWindows[0];
-                if (first) {
-                    void selectWindow(first.handle);
-                }
-            })
-            .catch((exc: unknown) => setError(errorMessage(exc)))
-            .finally(() => setBusy(''));
+        void detectWindows();
     }, []);
 
     useEffect(() => {
@@ -500,15 +540,17 @@ export default function TraceRecorder() {
                 return;
             }
             pollingRef.current = true;
-            void fetchTraceScreen(selectedHandle).unwrap()
-                .then((nextScreen) => {
+            void fetchTraceScreen({
+                windowHandle: selectedHandle,
+                includePreview: false,
+            }).unwrap()
+                .then(async (nextScreen) => {
                     const nextFingerprint = screenFingerprint(nextScreen);
                     if (nextFingerprint !== fingerprintRef.current) {
-                        fingerprintRef.current = nextFingerprint;
-                        setScreen(nextScreen);
+                        const capturedScreen = await fetchScreen(selectedHandle);
                         setSteps((current) => [
                             ...current,
-                            createStep('screen-change', nextScreen, current.length + 1),
+                            createStep('screen-change', capturedScreen, current.length + 1),
                         ]);
                     }
                 })
@@ -561,7 +603,7 @@ export default function TraceRecorder() {
                     </p>
                 </div>
                 <div style={{display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'start'}}>
-                    <button type="button" style={secondaryButton} onClick={() => void refreshWindows()}>
+                    <button type="button" style={secondaryButton} onClick={() => void detectWindows()}>
                         Detect Windows
                     </button>
                     {!recording ? (
@@ -599,11 +641,11 @@ export default function TraceRecorder() {
                 </div>
                 <div style={{display: 'flex', flexWrap: 'wrap', gap: 8}}>
                     <button type="button" style={button} onClick={() => void openConfirmedRtdPopup()}>Open + Confirm Popup</button>
-                    <button type="button" style={secondaryButton} onClick={() => void selectPopupLocation()}>Select Location Row</button>
-                    <button type="button" style={button} onClick={() => void executeRtdPopupAction('run')}>Run Function</button>
-                    <button type="button" style={secondaryButton} onClick={() => void executeRtdPopupAction('select_vehicle')}>Select Vehicle</button>
-                    <button type="button" style={secondaryButton} onClick={() => void executeRtdPopupAction('help')}>Help</button>
-                    <button type="button" style={dangerButton} onClick={() => void executeRtdPopupAction('cancel')}>Cancel</button>
+                    <button type="button" style={secondaryButton} disabled={rtdPopupHandle === null} onClick={() => void selectPopupLocation()}>Select Location Row</button>
+                    <button type="button" style={button} disabled={rtdPopupHandle === null} onClick={() => void executeRtdPopupAction('run')}>Run Function</button>
+                    <button type="button" style={secondaryButton} disabled={rtdPopupHandle === null} onClick={() => void executeRtdPopupAction('select_vehicle')}>Select Vehicle</button>
+                    <button type="button" style={secondaryButton} disabled={rtdPopupHandle === null} onClick={() => void executeRtdPopupAction('help')}>Help</button>
+                    <button type="button" style={dangerButton} disabled={rtdPopupHandle === null} onClick={() => void executeRtdPopupAction('cancel')}>Cancel</button>
                 </div>
                 {automationResult && <p style={{margin: '12px 0 0', color: '#166534', fontSize: 13}}>{automationResult}</p>}
             </div>

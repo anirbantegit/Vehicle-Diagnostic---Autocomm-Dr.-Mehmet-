@@ -188,6 +188,7 @@ export type TraceScreenResponse = {
     confirmed?: boolean;
     present?: boolean;
     action_result?: {performed: boolean; method: string | null; control: TraceControlItem};
+    target_window_closed?: boolean;
 };
 
 export type NativeControlSelector = {
@@ -203,6 +204,7 @@ export type RtdOpenResponse = {
     sent: unknown;
     confirmed: boolean;
     confirmation: string;
+    popup_window_handle: number;
     popup: TraceControlItem;
     run_button: TraceControlItem;
     screen: TraceScreenResponse;
@@ -260,6 +262,34 @@ export type VehicleSelectionResponse = {
     items?: VehicleSelectionItem[];
     [key: string]: unknown;
 };
+
+export type DiagnosticFunctionItem = {
+    index?: number | string;
+    id?: string;
+    name?: string;
+    title?: string;
+    icon?: string;
+    help?: Array<{id?: string; [key: string]: unknown}>;
+    [key: string]: unknown;
+};
+
+export type VinHistoryItem = {
+    name: string;
+    [key: string]: unknown;
+};
+
+export type VehicleContextResponse = {
+    active_vehicle_definition_id: string;
+    sent: unknown;
+};
+
+export type RtdVehicleOpenResponse = {
+    active_vehicle_definition_id: string;
+    rtd_function: DiagnosticFunctionItem;
+    selection_sent: unknown;
+    popup_sent: unknown;
+};
+
 
 export type AdminSessionResponse = {
     authenticated: boolean;
@@ -608,6 +638,56 @@ export function postVehicleSelection(
     });
 }
 
+export function activateVehicleContext(
+    vehicleDefinitionId: string,
+    protocol = '',
+): Promise<VehicleContextResponse> {
+    return bridgeRequest<VehicleContextResponse>('/bridge/admin/vehicles/activate', {
+        method: 'POST',
+        body: JSON.stringify({
+            vehicle_definition_id: vehicleDefinitionId,
+            protocol: protocol.trim() || null,
+        }),
+    });
+}
+
+export function getVinAvailable(): Promise<boolean> {
+    return bridgeRequest<boolean>('/bridge/vin/isavailable');
+}
+
+export function getVinHistory(): Promise<VinHistoryItem[]> {
+    return bridgeRequest<VinHistoryItem[]>('/bridge/vin/history');
+}
+
+export function selectVehicleByVin(vin: string): Promise<unknown> {
+    return bridgeRequest<unknown>('/bridge/admin/vin/select', {
+        method: 'POST',
+        body: JSON.stringify({vin}),
+    });
+}
+
+export function readVinFromVehicle(): Promise<unknown> {
+    return bridgeRequest<unknown>('/bridge/admin/vin/read', {
+        method: 'POST',
+    });
+}
+
+export function openVehicleRtdFunction(
+    vehicleDefinitionId: string,
+    rtdIndex: number,
+    protocol = '',
+): Promise<RtdVehicleOpenResponse> {
+    return bridgeRequest<RtdVehicleOpenResponse>('/bridge/admin/vehicles/rtd/open', {
+        method: 'POST',
+        body: JSON.stringify({
+            vehicle_definition_id: vehicleDefinitionId,
+            rtd_index: rtdIndex,
+            protocol: protocol.trim() || null,
+        }),
+    });
+}
+
+
 export function addVehicleFavourite(id: string): Promise<unknown> {
     return bridgeRequest<unknown>('/bridge/vehicles/favourites/add', {
         method: 'POST',
@@ -644,12 +724,12 @@ export function getVehicleCapabilities(
 export function getVehicleObdFunctions(
     vehicleDefinitionId: string,
     protocol = '',
-): Promise<unknown> {
+): Promise<DiagnosticFunctionItem[]> {
     const query = protocol.trim()
         ? `?protocol=${encodeURIComponent(protocol.trim())}`
         : '';
 
-    return bridgeRequest<unknown>(
+    return bridgeRequest<DiagnosticFunctionItem[]>(
         `/bridge/vehicles/${encodeURIComponent(vehicleDefinitionId)}/obd-functions${query}`,
     );
 }
@@ -657,12 +737,12 @@ export function getVehicleObdFunctions(
 export function getVehicleRtdFunctions(
     vehicleDefinitionId: string,
     protocol = '',
-): Promise<unknown> {
+): Promise<DiagnosticFunctionItem[]> {
     const query = protocol.trim()
         ? `?protocol=${encodeURIComponent(protocol.trim())}`
         : '';
 
-    return bridgeRequest<unknown>(
+    return bridgeRequest<DiagnosticFunctionItem[]>(
         `/bridge/vehicles/${encodeURIComponent(vehicleDefinitionId)}/rtd-functions${query}`,
     );
 }
@@ -676,9 +756,13 @@ export function getTraceWindows(): Promise<TraceWindowsResponse> {
     return bridgeRequest<TraceWindowsResponse>('/bridge/admin/trace/windows');
 }
 
-export function getTraceWindowScreen(windowHandle: number): Promise<TraceScreenResponse> {
+export function getTraceWindowScreen(
+    windowHandle: number,
+    includePreview = true,
+): Promise<TraceScreenResponse> {
+    const previewQuery = includePreview ? '' : '?include_preview=false';
     return bridgeRequest<TraceScreenResponse>(
-        `/bridge/admin/trace/windows/${encodeURIComponent(String(windowHandle))}/screen`,
+        `/bridge/admin/trace/windows/${encodeURIComponent(String(windowHandle))}/screen${previewQuery}`,
     );
 }
 
@@ -738,20 +822,30 @@ export function openRtdPopupAndConfirm(
 export function invokeRtdPopupAction(
     windowHandle: number,
     action: RtdPopupAction,
+    fallbackWindowHandle?: number,
 ): Promise<TraceScreenResponse> {
     return bridgeRequest<TraceScreenResponse>('/bridge/admin/automation/rtd/popup-action', {
         method: 'POST',
-        body: JSON.stringify({window_handle: windowHandle, action}),
+        body: JSON.stringify({
+            window_handle: windowHandle,
+            fallback_window_handle: fallbackWindowHandle,
+            action,
+        }),
     });
 }
 
 export function selectRtdLocation(
     windowHandle: number,
     locationText: string,
+    fallbackWindowHandle?: number,
 ): Promise<TraceScreenResponse> {
     return bridgeRequest<TraceScreenResponse>('/bridge/admin/automation/rtd/select-location', {
         method: 'POST',
-        body: JSON.stringify({window_handle: windowHandle, location_text: locationText}),
+        body: JSON.stringify({
+            window_handle: windowHandle,
+            fallback_window_handle: fallbackWindowHandle,
+            location_text: locationText,
+        }),
     });
 }
 

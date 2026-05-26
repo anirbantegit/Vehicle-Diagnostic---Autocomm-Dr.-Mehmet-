@@ -4,6 +4,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+from app.automation.window import temporary_capture_focus
 from app.config import ROOT_DIR
 
 
@@ -41,9 +42,10 @@ def _valid_rect(rect) -> bool:
 
 
 def capture_window_data_url(win) -> str | None:
-    """Return a PNG preview for tracing without writing image files to disk."""
+    """Return an accurate PNG preview while restoring the previous foreground window."""
     try:
-        image = win.capture_as_image()
+        with temporary_capture_focus(win):
+            image = win.capture_as_image()
         buffer = io.BytesIO()
         image.save(buffer, format="PNG")
         encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
@@ -88,13 +90,18 @@ def extract_visible_texts(win):
         "texts": texts
     }
 
-def extract_trace_screen(win):
+def extract_trace_screen(win, include_preview: bool = True):
     """Capture visible controls, including unnamed icon/custom controls, for tracing."""
     controls = []
     win_rect = win.rectangle()
     window_rect = rect_to_dict(win_rect)
 
-    for index, ctrl in enumerate(win.descendants()):
+    try:
+        candidates = [win, *win.descendants()]
+    except Exception:
+        candidates = [win]
+
+    for index, ctrl in enumerate(candidates):
         try:
             rect = ctrl.rectangle()
             if not _valid_rect(rect):
@@ -139,7 +146,7 @@ def extract_trace_screen(win):
         "control_count": len(controls),
         "controls": controls,
         "active_modal": active_modal,
-        "screenshot_data_url": capture_window_data_url(win),
+        "screenshot_data_url": capture_window_data_url(win) if include_preview else None,
     }
 
 def save_extract(result, output_file):

@@ -4,6 +4,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
+from pywinauto import Desktop
 
 from app.automation.clicker import (
     click_first_match,
@@ -67,6 +68,12 @@ class NativeControlRequest(BaseModel):
     action: str = "invoke"
     present: bool = True
     timeout_seconds: float = Field(default=5.0, ge=0.1, le=30.0)
+    fallback_window_handle: int | None = None
+
+
+class FindWindowControlRequest(NativeControlRequest):
+    source_window_handle: int | None = None
+    same_process: bool = True
 
 
 class EngineLaunchRequest(BaseModel):
@@ -99,10 +106,20 @@ def selector_from_request(payload: NativeControlRequest) -> ControlSelector:
     )
 
 
-def trace_snapshot(win) -> dict:
+def trace_snapshot(win, include_preview: bool = True) -> dict:
+    window = describe_window(win)
+    related_windows = []
+    if window.get("pid") is not None:
+        related_windows = [
+            candidate
+            for candidate in list_traceable_windows()
+            if candidate.get("pid") == window["pid"]
+        ]
+
     return {
-        "window": describe_window(win),
-        **extract_trace_screen(win),
+        "window": window,
+        "related_windows": related_windows,
+        **extract_trace_screen(win, include_preview=include_preview),
     }
 
 
@@ -115,6 +132,53 @@ def matched_snapshot_control(snapshot: dict, selector: ControlSelector) -> dict 
         ):
             return control
     return None
+
+
+def wait_for_window_control(payload: FindWindowControlRequest) -> dict:
+    selector = selector_from_request(payload)
+    source_pid = None
+
+    if payload.source_window_handle is not None:
+        source_window = connect_window_by_handle(payload.source_window_handle, focus=False)
+        source_pid = describe_window(source_window).get("pid")
+
+    deadline = time.monotonic() + max(0.1, payload.timeout_seconds)
+    while time.monotonic() <= deadline:
+        for candidate in Desktop(backend="uia").windows():
+            try:
+                candidate_info = describe_window(candidate)
+                if not candidate_info.get("handle"):
+                    continue
+                if payload.same_process and source_pid is not None and candidate_info.get("pid") != source_pid:
+                    continue
+
+                control = find_first_control(candidate, selector)
+                if control is None:
+                    continue
+
+                snapshot = trace_snapshot(candidate)
+                matched_control = matched_snapshot_control(snapshot, selector)
+                if matched_control is None:
+                    continue
+
+                return {
+                    **snapshot,
+                    "confirmed": True,
+                    "present": True,
+                    "matched_control": matched_control,
+                }
+            except Exception:
+                continue
+
+        time.sleep(0.2)
+
+    raise HTTPException(
+        status_code=408,
+        detail={
+            "code": "CONTROL_WINDOW_WAIT_TIMEOUT",
+            "message": "A desktop window containing the requested native control was not detected before timeout.",
+        },
+    )
 
 
 def screen_has_any(result: dict, keywords: list[str]) -> bool:
@@ -189,12 +253,16 @@ def require_autocom_window():
 def trace_windows():
     return {"windows": list_traceable_windows()}
 
+@app.post("/agent/trace/find-window-control")
+def trace_find_window_control(payload: FindWindowControlRequest):
+    return safe_call(wait_for_window_control, payload)
+
 
 @app.get("/agent/trace/windows/{window_handle}/screen")
-def trace_window_screen(window_handle: int):
+def trace_window_screen(window_handle: int, include_preview: bool = True):
     def _run():
         win = connect_window_by_handle(window_handle, focus=False)
-        return trace_snapshot(win)
+        return trace_snapshot(win, include_preview=include_preview)
 
     return safe_call(_run)
 
@@ -282,8 +350,19 @@ def trace_window_control_action(window_handle: int, payload: NativeControlReques
             )
 
         time.sleep(0.2)
+        try:
+            snapshot = trace_snapshot(win)
+            target_window_closed = False
+        except Exception:
+            if payload.fallback_window_handle is None:
+                raise
+            fallback = connect_window_by_handle(payload.fallback_window_handle, focus=False)
+            snapshot = trace_snapshot(fallback)
+            target_window_closed = True
+
         return {
-            **trace_snapshot(win),
+            **snapshot,
+            "target_window_closed": target_window_closed,
             "action_result": action_result,
         }
 
@@ -313,7 +392,7 @@ def screen_texts():
 def click_text(payload: ClickTextRequest):
     def _run():
         require_autocom_window()
-        win = connect_autocom_window(focus=False)
+        win = connect_autocom_window()
         matches = find_text_controls_in_region(
             win=win,
             target_text=payload.text,

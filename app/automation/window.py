@@ -1,6 +1,8 @@
 import re
 import time
+from contextlib import contextmanager
 
+import win32gui
 from pywinauto import Desktop
 
 from app.config import WINDOW_TITLE_RE
@@ -69,24 +71,44 @@ def list_visible_windows(desktop):
 
     return titles
 
+def _has_usable_rect(item: dict) -> bool:
+    rect = item.get("rect")
+    return bool(rect and rect["width"] > 0 and rect["height"] > 0)
+
+
+def window_area_by_item(item: dict) -> int:
+    rect = item.get("rect")
+    if not rect:
+        return 0
+    return rect["width"] * rect["height"]
+
 
 def list_traceable_windows() -> list[dict]:
-    """List visible top-level windows without activating or focusing them."""
+    """List trace targets without hiding a configured engine that status already detected."""
     desktop = Desktop(backend="uia")
     windows: list[dict] = []
 
     for window in desktop.windows():
         item = describe_window(window)
-        if not item["visible"] or not item["handle"] or not item["title"]:
+        if not item["handle"] or not item["title"]:
             continue
-        if not item["rect"] or item["rect"]["width"] <= 0 or item["rect"]["height"] <= 0:
+
+        # Keep title-matched engine windows aligned with health detection.
+        # Some native UIA providers expose a readable title while reporting
+        # incomplete visibility/rectangle metadata; they are still valid
+        # trace targets to attempt.
+        if not item["engine_candidate"] and (
+            not item["visible"] or not _has_usable_rect(item)
+        ):
             continue
+
         windows.append(item)
 
     windows.sort(
         key=lambda item: (
             bool(item["engine_candidate"]),
-            item["rect"]["width"] * item["rect"]["height"],
+            _has_usable_rect(item),
+            window_area_by_item(item),
         ),
         reverse=True,
     )
@@ -170,6 +192,59 @@ def _prepare_window(win, focus: bool = False):
 def connect_window_by_handle(handle: int, focus: bool = False):
     desktop = Desktop(backend="uia")
     return _prepare_window(select_window_by_handle(desktop, handle), focus=focus)
+
+@contextmanager
+def temporary_capture_focus(win):
+    """
+    Temporarily bring a selected trace window to the foreground only while
+    capturing visible pixels, then restore the operator's previous foreground
+    window and minimized state.
+    """
+    target_handle = int(getattr(win, "handle", 0) or 0)
+    previous_handle = int(win32gui.GetForegroundWindow() or 0)
+    target_was_minimized = bool(_safe_call(win.is_minimized, False))
+    focused_for_capture = bool(target_handle and target_handle != previous_handle)
+
+    try:
+        if focused_for_capture or target_was_minimized:
+            _prepare_window(win, focus=True)
+
+            if (
+                target_handle
+                and int(win32gui.GetForegroundWindow() or 0) != target_handle
+            ):
+                raise RuntimeError(
+                    "Selected trace window could not be foregrounded for an accurate screenshot."
+                )
+
+        yield
+    finally:
+        if target_was_minimized:
+            _safe_call(win.minimize)
+
+        if (
+            focused_for_capture
+            and previous_handle
+            and previous_handle != target_handle
+            and win32gui.IsWindow(previous_handle)
+        ):
+            try:
+                previous_window = select_window_by_handle(
+                    Desktop(backend="uia"),
+                    previous_handle,
+                )
+                _prepare_window(previous_window, focus=True)
+
+                if int(win32gui.GetForegroundWindow() or 0) != previous_handle:
+                    win32gui.SetForegroundWindow(previous_handle)
+                    time.sleep(0.1)
+            except Exception:
+                try:
+                    win32gui.SetForegroundWindow(previous_handle)
+                    time.sleep(0.1)
+                except Exception:
+                    pass
+
 
 
 def connect_autocom_window(focus: bool = True):

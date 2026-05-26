@@ -76,8 +76,13 @@ export const bridgeApi = createApi({
         getTraceWindows: builder.query<TraceWindowsResponse, void>({
             query: () => ({path: '/bridge/admin/trace/windows'}),
         }),
-        getTraceWindowScreen: builder.query<TraceScreenResponse, number>({
-            query: (windowHandle) => ({path: `/bridge/admin/trace/windows/${windowHandle}/screen`}),
+        getTraceWindowScreen: builder.query<
+            TraceScreenResponse,
+            {windowHandle: number; includePreview?: boolean}
+        >({
+            query: ({windowHandle, includePreview = true}) => ({
+                path: `/bridge/admin/trace/windows/${windowHandle}/screen${includePreview ? '' : '?include_preview=false'}`,
+            }),
         }),
         clickTraceWindowPoint: builder.mutation<TraceScreenResponse, {windowHandle: number; x: number; y: number}>({
             query: ({windowHandle, x, y}) => ({
@@ -100,18 +105,26 @@ export const bridgeApi = createApi({
                 body: {window_handle: windowHandle, rtd_index: rtdIndex},
             }),
         }),
-        invokeRtdPopupAction: builder.mutation<TraceScreenResponse, {windowHandle: number; action: RtdPopupAction}>({
-            query: ({windowHandle, action}) => ({
+        invokeRtdPopupAction: builder.mutation<TraceScreenResponse, {windowHandle: number; fallbackWindowHandle?: number; action: RtdPopupAction}>({
+            query: ({windowHandle, fallbackWindowHandle, action}) => ({
                 path: '/bridge/admin/automation/rtd/popup-action',
                 method: 'POST',
-                body: {window_handle: windowHandle, action},
+                body: {
+                    window_handle: windowHandle,
+                    fallback_window_handle: fallbackWindowHandle,
+                    action,
+                },
             }),
         }),
-        selectRtdLocation: builder.mutation<TraceScreenResponse, {windowHandle: number; locationText: string}>({
-            query: ({windowHandle, locationText}) => ({
+        selectRtdLocation: builder.mutation<TraceScreenResponse, {windowHandle: number; fallbackWindowHandle?: number; locationText: string}>({
+            query: ({windowHandle, fallbackWindowHandle, locationText}) => ({
                 path: '/bridge/admin/automation/rtd/select-location',
                 method: 'POST',
-                body: {window_handle: windowHandle, location_text: locationText},
+                body: {
+                    window_handle: windowHandle,
+                    fallback_window_handle: fallbackWindowHandle,
+                    location_text: locationText,
+                },
             }),
         }),
     }),

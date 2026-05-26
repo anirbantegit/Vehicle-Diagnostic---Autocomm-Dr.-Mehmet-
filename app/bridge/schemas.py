@@ -30,6 +30,18 @@ class VehicleSelectionRequest(BaseModel):
     list_type: str
     vehicle_id: str = ""
 
+class VehicleContextRequest(BaseModel):
+    vehicle_definition_id: str = Field(min_length=1)
+    protocol: str | None = None
+
+
+class VinSelectionRequest(BaseModel):
+    vin: str = ""
+
+
+class RtdFunctionOpenRequest(VehicleContextRequest):
+    rtd_index: int
+
 
 class RunDiagnosisRequest(BaseModel):
     function_name: str
