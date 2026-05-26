@@ -93,6 +93,31 @@ class ClickPointRequest(BaseModel):
     x: int
     y: int
 
+class NativeControlRequest(BaseModel):
+    automation_id: str = ""
+    text: str = ""
+    control_type: str = ""
+    parent_automation_id: str = ""
+    action: str = "invoke"
+    present: bool = True
+    timeout_seconds: float = Field(default=5.0, ge=0.1, le=30.0)
+
+
+class RtdOpenRequest(BaseModel):
+    window_handle: int
+    rtd_index: int
+    timeout_seconds: float = Field(default=6.0, ge=0.1, le=30.0)
+
+
+class RtdPopupActionRequest(BaseModel):
+    window_handle: int
+    action: str
+
+
+class RtdLocationRequest(BaseModel):
+    window_handle: int
+    location_text: str = Field(min_length=1)
+
 
 def extract_bearer_token(
     credentials: HTTPAuthorizationCredentials | None = None,
@@ -330,6 +355,146 @@ def bridge_agent_status(_: bool = Depends(require_token)):
 @app.get("/bridge/screen/texts")
 def bridge_screen_texts(_: bool = Depends(require_token)):
     return agent_request("GET", "/agent/screen/texts")
+
+@app.get("/bridge/admin/trace/windows")
+def bridge_trace_windows(_: dict = Depends(require_admin_session)):
+    return agent_request("GET", "/agent/trace/windows")
+
+
+@app.get("/bridge/admin/trace/windows/{window_handle}/screen")
+def bridge_trace_window_screen(window_handle: int, _: dict = Depends(require_admin_session)):
+    return agent_request("GET", f"/agent/trace/windows/{window_handle}/screen", timeout=30)
+
+
+@app.post("/bridge/admin/trace/windows/{window_handle}/click-point")
+def bridge_trace_window_click_point(
+    window_handle: int,
+    payload: ClickPointRequest,
+    _: dict = Depends(require_admin_session),
+):
+    return agent_request(
+        "POST",
+        f"/agent/trace/windows/{window_handle}/click-point",
+        payload.model_dump(),
+        timeout=30,
+    )
+
+@app.post("/bridge/admin/trace/windows/{window_handle}/wait-control")
+def bridge_trace_window_wait_control(
+    window_handle: int,
+    payload: NativeControlRequest,
+    _: dict = Depends(require_admin_session),
+):
+    return agent_request(
+        "POST",
+        f"/agent/trace/windows/{window_handle}/wait-control",
+        payload.model_dump(),
+        timeout=35,
+    )
+
+
+@app.post("/bridge/admin/trace/windows/{window_handle}/control-action")
+def bridge_trace_window_control_action(
+    window_handle: int,
+    payload: NativeControlRequest,
+    _: dict = Depends(require_admin_session),
+):
+    return agent_request(
+        "POST",
+        f"/agent/trace/windows/{window_handle}/control-action",
+        payload.model_dump(),
+        timeout=30,
+    )
+
+
+@app.post("/bridge/admin/automation/rtd/open")
+def bridge_open_rtd_popup(payload: RtdOpenRequest, _: dict = Depends(require_admin_session)):
+    sent = safe_call(signalr_client.send, "viewRTDHelpDocument", payload.rtd_index)
+
+    popup_screen = agent_request(
+        "POST",
+        f"/agent/trace/windows/{payload.window_handle}/wait-control",
+        {
+            "automation_id": "FormOBDFunction",
+            "control_type": "Window",
+            "present": True,
+            "timeout_seconds": payload.timeout_seconds,
+        },
+        timeout=35,
+    )
+    run_screen = agent_request(
+        "POST",
+        f"/agent/trace/windows/{payload.window_handle}/wait-control",
+        {
+            "automation_id": "autocomButtonPlay",
+            "control_type": "Button",
+            "parent_automation_id": "FormOBDFunction",
+            "present": True,
+            "timeout_seconds": payload.timeout_seconds,
+        },
+        timeout=35,
+    )
+
+    return {
+        "sent": sent,
+        "confirmed": True,
+        "confirmation": "Native RTD popup and Run button were detected through UI Automation.",
+        "popup": popup_screen["matched_control"],
+        "run_button": run_screen["matched_control"],
+        "screen": run_screen,
+    }
+
+
+@app.post("/bridge/admin/automation/rtd/popup-action")
+def bridge_rtd_popup_action(
+    payload: RtdPopupActionRequest,
+    _: dict = Depends(require_admin_session),
+):
+    button_ids = {
+        "run": "autocomButtonPlay",
+        "select_vehicle": "autocomButtonNavigate",
+        "help": "autocomButtonHelp",
+        "cancel": "buttonClose",
+    }
+    automation_id = button_ids.get(payload.action)
+    if automation_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_RTD_POPUP_ACTION",
+                "message": "Unsupported RTD popup action.",
+            },
+        )
+
+    return agent_request(
+        "POST",
+        f"/agent/trace/windows/{payload.window_handle}/control-action",
+        {
+            "automation_id": automation_id,
+            "control_type": "Button",
+            "parent_automation_id": "FormOBDFunction",
+            "action": "invoke",
+        },
+        timeout=30,
+    )
+
+
+@app.post("/bridge/admin/automation/rtd/select-location")
+def bridge_rtd_select_location(
+    payload: RtdLocationRequest,
+    _: dict = Depends(require_admin_session),
+):
+    return agent_request(
+        "POST",
+        f"/agent/trace/windows/{payload.window_handle}/control-action",
+        {
+            "text": payload.location_text.strip(),
+            "control_type": "ListItem",
+            "parent_automation_id": "listBoxLocations",
+            "action": "select",
+        },
+        timeout=30,
+    )
 
 
 @app.post("/bridge/generic-obd/start")

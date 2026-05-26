@@ -41,14 +41,16 @@ python scripts\\run_desktop_agent.py
 # Terminal 2
 python scripts\\run_bridge.py
 
-# React development
+# React development with live reload
 cd admin-ui
-npm install
-npm run dev
+pnpm install
+pnpm run dev
+# Open http://127.0.0.1:5173/admin/
 
 # Production build served at /admin
-npm run build
-python scripts\\run_bridge.py`}
+pnpm run build
+python scripts\\run_bridge.py
+# Open http://127.0.0.1:8090/admin/`}
     </pre>
                 </section>
 

@@ -1,3 +1,5 @@
+import base64
+import io
 import json
 from datetime import datetime
 from pathlib import Path
@@ -34,6 +36,21 @@ def rect_to_dict(rect, window_rect=None):
 
     return result
 
+def _valid_rect(rect) -> bool:
+    return bool(rect and rect.right > rect.left and rect.bottom > rect.top)
+
+
+def capture_window_data_url(win) -> str | None:
+    """Return a PNG preview for tracing without writing image files to disk."""
+    try:
+        image = win.capture_as_image()
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+        return f"data:image/png;base64,{encoded}"
+    except Exception:
+        return None
+
 
 def extract_visible_texts(win):
     texts = []
@@ -48,6 +65,8 @@ def extract_visible_texts(win):
                 continue
 
             rect = ctrl.rectangle()
+            if not _valid_rect(rect):
+                continue
             rect_info = rect_to_dict(rect, win_rect)
 
             texts.append({
@@ -69,6 +88,59 @@ def extract_visible_texts(win):
         "texts": texts
     }
 
+def extract_trace_screen(win):
+    """Capture visible controls, including unnamed icon/custom controls, for tracing."""
+    controls = []
+    win_rect = win.rectangle()
+    window_rect = rect_to_dict(win_rect)
+
+    for index, ctrl in enumerate(win.descendants()):
+        try:
+            rect = ctrl.rectangle()
+            if not _valid_rect(rect):
+                continue
+
+            text = (ctrl.window_text() or "").strip()
+            control_type = ctrl.element_info.control_type or "Unknown"
+            automation_id = ctrl.element_info.automation_id or ""
+            class_name = ctrl.element_info.class_name or ""
+            rect_info = rect_to_dict(rect, win_rect)
+
+            # pywinauto may expose outer background containers far outside useful bounds.
+            if rect_info["width"] <= 0 or rect_info["height"] <= 0:
+                continue
+
+            controls.append({
+                "index": index,
+                "text": text,
+                "label": text or automation_id or f"Unnamed {control_type}",
+                "control_type": control_type,
+                "automation_id": automation_id,
+                "class_name": class_name,
+                "rect": str(rect),
+                "rect_info": rect_info,
+            })
+        except Exception:
+            pass
+
+    active_modal = next(
+        (
+            control for control in controls
+            if control["automation_id"] == "FormOBDFunction"
+            and control["control_type"].casefold() == "window"
+        ),
+        None,
+    )
+
+    return {
+        "timestamp": datetime.now().isoformat(),
+        "window_detected": True,
+        "window_rect": window_rect,
+        "control_count": len(controls),
+        "controls": controls,
+        "active_modal": active_modal,
+        "screenshot_data_url": capture_window_data_url(win),
+    }
 
 def save_extract(result, output_file):
     output_path = Path(output_file)

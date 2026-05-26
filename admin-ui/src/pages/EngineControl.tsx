@@ -15,6 +15,7 @@ import {
     testVci,
 } from '../api/bridgeClient';
 import {redactDisplayValue} from "../utils/redactDisplay";
+import TraceRecorder from "../features/debug/automation/TraceRecorder";
 
 const panel: React.CSSProperties = {
     background: '#fff',
@@ -199,6 +200,8 @@ export default function EngineControl() {
                 </div>
             )
             }
+
+            <TraceRecorder/>
 
             <div
                 style={{

@@ -140,6 +140,75 @@ export type ScreenTextsResponse = {
     texts: ScreenTextItem[];
 };
 
+export type TraceWindowRect = {
+    left: number;
+    top: number;
+    right: number;
+    bottom: number;
+    width: number;
+    height: number;
+};
+
+export type TraceWindow = {
+    handle: number;
+    pid: number | null;
+    title: string;
+    class_name: string;
+    control_type: string;
+    visible: boolean;
+    enabled: boolean;
+    engine_candidate: boolean;
+    engine_label: string | null;
+    rect: TraceWindowRect | null;
+};
+
+export type TraceControlItem = ScreenTextItem & {
+    index: number;
+    label: string;
+};
+
+export type TraceWindowsResponse = {
+    windows: TraceWindow[];
+};
+
+export type TraceScreenResponse = {
+    timestamp: string;
+    window_detected: boolean;
+    window: TraceWindow;
+    window_rect: UiRectInfo;
+    control_count: number;
+    controls: TraceControlItem[];
+    screenshot_data_url: string | null;
+    clicked?: boolean;
+    point?: {x: number; y: number; relative_x: number; relative_y: number};
+    windows?: TraceWindow[];
+    related_windows?: TraceWindow[];
+    active_modal?: TraceControlItem | null;
+    matched_control?: TraceControlItem | null;
+    confirmed?: boolean;
+    present?: boolean;
+    action_result?: {performed: boolean; method: string | null; control: TraceControlItem};
+};
+
+export type NativeControlSelector = {
+    automation_id?: string;
+    text?: string;
+    control_type?: string;
+    parent_automation_id?: string;
+};
+
+export type RtdPopupAction = 'run' | 'select_vehicle' | 'help' | 'cancel';
+
+export type RtdOpenResponse = {
+    sent: unknown;
+    confirmed: boolean;
+    confirmation: string;
+    popup: TraceControlItem;
+    run_button: TraceControlItem;
+    screen: TraceScreenResponse;
+};
+
+
 export type ActionLogEntry = {
     id: string;
     timestamp: string;
@@ -262,12 +331,33 @@ function safeStringify(value: unknown): string {
     }
 }
 
+function removeOversizedLogFields(value: unknown): unknown {
+    if (Array.isArray(value)) {
+        return value.map(removeOversizedLogFields);
+    }
+
+    if (value && typeof value === 'object') {
+        return Object.fromEntries(
+            Object.entries(value as Record<string, unknown>).map(([key, nestedValue]) => {
+                if (key === 'screenshot_data_url') {
+                    return [key, '[OMITTED_FROM_ACTION_LOG]'];
+                }
+
+                return [key, removeOversizedLogFields(nestedValue)];
+            }),
+        );
+    }
+
+    return value;
+}
+
+
 function clipForLog(value: unknown): unknown {
     if (value === undefined) {
         return undefined;
     }
 
-    const redactedValue = redactSensitiveValue(value);
+    const redactedValue = redactSensitiveValue(removeOversizedLogFields(value));
     const text = safeStringify(redactedValue);
     if (text.length <= MAX_LOG_PAYLOAD_CHARS) {
         try {
@@ -330,11 +420,19 @@ export function appendActionLog(entry: Omit<ActionLogEntry, 'id' | 'timestamp'>)
     };
 
     const logs = [nextEntry, ...getActionLogs()].slice(0, MAX_ACTION_LOGS);
+    let persistedLogs = logs;
 
-    try {
-        localStorage.setItem(ACTION_LOG_STORAGE_KEY, JSON.stringify(logs));
-    } catch {
-        localStorage.setItem(ACTION_LOG_STORAGE_KEY, JSON.stringify(logs.slice(0, 50)));
+    while (persistedLogs.length > 0) {
+        try {
+            localStorage.setItem(ACTION_LOG_STORAGE_KEY, JSON.stringify(persistedLogs));
+            break;
+        } catch {
+            persistedLogs = persistedLogs.slice(0, Math.floor(persistedLogs.length / 2));
+        }
+    }
+
+    if (persistedLogs.length === 0) {
+        localStorage.removeItem(ACTION_LOG_STORAGE_KEY);
     }
 
     notifyActionLogListeners(getActionLogs());
@@ -372,31 +470,32 @@ function buildHeaders(options?: RequestInit, authenticated = true): HeadersInit 
     };
 }
 
-function parseErrorMessage(data: unknown, status: number): string {
-    if (!data || typeof data !== 'object') {
-        return `Bridge request failed: ${status}`;
+function nestedErrorMessage(value: unknown): string | null {
+    if (typeof value === 'string' && value.trim()) {
+        return value;
     }
 
-    const value = data as {
-        detail?: string | { message?: string; code?: string };
-        message?: string;
+    if (!value || typeof value !== 'object') {
+        return null;
+    }
+
+    const candidate = value as {
+        code?: unknown;
+        message?: unknown;
+        detail?: unknown;
     };
 
-    if (typeof value.detail === 'string') {
-        return value.detail;
+    if (typeof candidate.message === 'string' && candidate.message.trim()) {
+        return typeof candidate.code === 'string' && candidate.code.trim()
+            ? `${candidate.code}: ${candidate.message}`
+            : candidate.message;
     }
 
-    if (value.detail?.message) {
-        return value.detail.code
-            ? `${value.detail.code}: ${value.detail.message}`
-            : value.detail.message;
-    }
+    return nestedErrorMessage(candidate.detail);
+}
 
-    if (value.message) {
-        return value.message;
-    }
-
-    return `Bridge request failed: ${status}`;
+function parseErrorMessage(data: unknown, status: number): string {
+    return nestedErrorMessage(data) || `Bridge request failed: ${status}`;
 }
 
 export async function bridgeRequest<T>(
@@ -572,6 +671,90 @@ export function getVehicleRtdFunctions(
 export function getScreenTexts(): Promise<ScreenTextsResponse> {
     return bridgeRequest<ScreenTextsResponse>('/bridge/screen/texts');
 }
+
+export function getTraceWindows(): Promise<TraceWindowsResponse> {
+    return bridgeRequest<TraceWindowsResponse>('/bridge/admin/trace/windows');
+}
+
+export function getTraceWindowScreen(windowHandle: number): Promise<TraceScreenResponse> {
+    return bridgeRequest<TraceScreenResponse>(
+        `/bridge/admin/trace/windows/${encodeURIComponent(String(windowHandle))}/screen`,
+    );
+}
+
+export function clickTraceWindowPoint(
+    windowHandle: number,
+    x: number,
+    y: number,
+): Promise<TraceScreenResponse> {
+    return bridgeRequest<TraceScreenResponse>(
+        `/bridge/admin/trace/windows/${encodeURIComponent(String(windowHandle))}/click-point`,
+        {
+            method: 'POST',
+            body: JSON.stringify({x, y}),
+        },
+    );
+}
+
+export function waitForNativeControl(
+    windowHandle: number,
+    selector: NativeControlSelector,
+    present = true,
+    timeoutSeconds = 5,
+): Promise<TraceScreenResponse> {
+    return bridgeRequest<TraceScreenResponse>(
+        `/bridge/admin/trace/windows/${encodeURIComponent(String(windowHandle))}/wait-control`,
+        {
+            method: 'POST',
+            body: JSON.stringify({...selector, present, timeout_seconds: timeoutSeconds}),
+        },
+    );
+}
+
+export function invokeNativeControl(
+    windowHandle: number,
+    selector: NativeControlSelector,
+    action: 'invoke' | 'select' | 'toggle' = 'invoke',
+): Promise<TraceScreenResponse> {
+    return bridgeRequest<TraceScreenResponse>(
+        `/bridge/admin/trace/windows/${encodeURIComponent(String(windowHandle))}/control-action`,
+        {
+            method: 'POST',
+            body: JSON.stringify({...selector, action}),
+        },
+    );
+}
+
+export function openRtdPopupAndConfirm(
+    windowHandle: number,
+    rtdIndex: number,
+): Promise<RtdOpenResponse> {
+    return bridgeRequest<RtdOpenResponse>('/bridge/admin/automation/rtd/open', {
+        method: 'POST',
+        body: JSON.stringify({window_handle: windowHandle, rtd_index: rtdIndex}),
+    });
+}
+
+export function invokeRtdPopupAction(
+    windowHandle: number,
+    action: RtdPopupAction,
+): Promise<TraceScreenResponse> {
+    return bridgeRequest<TraceScreenResponse>('/bridge/admin/automation/rtd/popup-action', {
+        method: 'POST',
+        body: JSON.stringify({window_handle: windowHandle, action}),
+    });
+}
+
+export function selectRtdLocation(
+    windowHandle: number,
+    locationText: string,
+): Promise<TraceScreenResponse> {
+    return bridgeRequest<TraceScreenResponse>('/bridge/admin/automation/rtd/select-location', {
+        method: 'POST',
+        body: JSON.stringify({window_handle: windowHandle, location_text: locationText}),
+    });
+}
+
 
 export function startGenericObd(): Promise<unknown> {
     return bridgeRequest<unknown>('/bridge/generic-obd/start', {

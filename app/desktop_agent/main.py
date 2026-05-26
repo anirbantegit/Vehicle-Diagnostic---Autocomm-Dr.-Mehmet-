@@ -10,8 +10,20 @@ from app.automation.clicker import (
     click_window_relative,
     find_text_controls_in_region,
 )
-from app.automation.extractor import extract_visible_texts
-from app.automation.window import connect_autocom_window, get_autocom_window_status
+from app.automation.control_actions import (
+    ControlSelector,
+    find_first_control,
+    perform_native_action,
+    wait_for_control_state,
+)
+from app.automation.extractor import extract_trace_screen, extract_visible_texts
+from app.automation.window import (
+    connect_autocom_window,
+    connect_window_by_handle,
+    describe_window,
+    get_autocom_window_status,
+    list_traceable_windows,
+)
 from app.config import (
     DEFAULT_WAIT_AFTER_CLICK,
     DIAGNOSTIC_READY_KEYWORDS,
@@ -46,6 +58,17 @@ class ClickPointRequest(BaseModel):
     x: int
     y: int
 
+
+class NativeControlRequest(BaseModel):
+    automation_id: str = ""
+    text: str = ""
+    control_type: str = ""
+    parent_automation_id: str = ""
+    action: str = "invoke"
+    present: bool = True
+    timeout_seconds: float = Field(default=5.0, ge=0.1, le=30.0)
+
+
 class EngineLaunchRequest(BaseModel):
     module: str
     label: str
@@ -57,6 +80,41 @@ FULL_WINDOW_REGION = {
     "top_min": 0,
     "top_max": 1200,
 }
+
+def selector_from_request(payload: NativeControlRequest) -> ControlSelector:
+    if not payload.automation_id.strip() and not payload.text.strip():
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "CONTROL_SELECTOR_REQUIRED",
+                "message": "Provide automation_id or text for the native control.",
+            },
+        )
+
+    return ControlSelector(
+        automation_id=payload.automation_id.strip(),
+        text=payload.text.strip(),
+        control_type=payload.control_type.strip(),
+        parent_automation_id=payload.parent_automation_id.strip(),
+    )
+
+
+def trace_snapshot(win) -> dict:
+    return {
+        "window": describe_window(win),
+        **extract_trace_screen(win),
+    }
+
+
+def matched_snapshot_control(snapshot: dict, selector: ControlSelector) -> dict | None:
+    for control in snapshot.get("controls", []):
+        if (
+            (not selector.automation_id or control.get("automation_id") == selector.automation_id)
+            and (not selector.text or control.get("text", "").casefold() == selector.text.casefold())
+            and (not selector.control_type or control.get("control_type", "").casefold() == selector.control_type.casefold())
+        ):
+            return control
+    return None
 
 
 def screen_has_any(result: dict, keywords: list[str]) -> bool:
@@ -127,6 +185,111 @@ def require_autocom_window():
         )
     return True
 
+@app.get("/agent/trace/windows")
+def trace_windows():
+    return {"windows": list_traceable_windows()}
+
+
+@app.get("/agent/trace/windows/{window_handle}/screen")
+def trace_window_screen(window_handle: int):
+    def _run():
+        win = connect_window_by_handle(window_handle, focus=False)
+        return trace_snapshot(win)
+
+    return safe_call(_run)
+
+
+@app.post("/agent/trace/windows/{window_handle}/click-point")
+def trace_window_click_point(window_handle: int, payload: ClickPointRequest):
+    def _run():
+        # Coordinate clicks are the explicit foreground fallback only.
+        win = connect_window_by_handle(window_handle, focus=True)
+        point = click_window_relative(win, payload.x, payload.y)
+        time.sleep(DEFAULT_WAIT_AFTER_CLICK)
+        return {
+            "clicked": True,
+            "point": point,
+            **trace_snapshot(win),
+            "windows": list_traceable_windows(),
+        }
+
+    return safe_call(_run)
+
+@app.post("/agent/trace/windows/{window_handle}/wait-control")
+def trace_window_wait_control(window_handle: int, payload: NativeControlRequest):
+    def _run():
+        win = connect_window_by_handle(window_handle, focus=False)
+        selector = selector_from_request(payload)
+        _control, confirmed = wait_for_control_state(
+            win,
+            selector,
+            present=payload.present,
+            timeout_seconds=payload.timeout_seconds,
+        )
+        if not confirmed:
+            raise HTTPException(
+                status_code=408,
+                detail={
+                    "code": "CONTROL_WAIT_TIMEOUT",
+                    "message": "Native control did not reach the requested state before timeout.",
+                },
+            )
+
+        snapshot = trace_snapshot(win)
+        matched_control = matched_snapshot_control(snapshot, selector) if payload.present else None
+        if payload.present and matched_control is None:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "CONTROL_CAPTURE_MISMATCH",
+                    "message": "Native control was found but could not be mapped into the trace snapshot.",
+                },
+            )
+
+        return {
+            **snapshot,
+            "confirmed": True,
+            "present": payload.present,
+            "matched_control": matched_control,
+        }
+
+    return safe_call(_run)
+
+
+@app.post("/agent/trace/windows/{window_handle}/control-action")
+def trace_window_control_action(window_handle: int, payload: NativeControlRequest):
+    def _run():
+        win = connect_window_by_handle(window_handle, focus=False)
+        control = find_first_control(win, selector_from_request(payload))
+        if control is None:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "code": "CONTROL_NOT_FOUND",
+                    "message": "Native control was not found in the selected desktop window.",
+                },
+            )
+
+        action_result = perform_native_action(control, payload.action)
+        if not action_result.get("performed"):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "CONTROL_ACTION_FAILED",
+                    "message": "Native control action was not performed.",
+                    "errors": action_result.get("errors", []),
+                },
+            )
+
+        time.sleep(0.2)
+        return {
+            **trace_snapshot(win),
+            "action_result": action_result,
+        }
+
+    return safe_call(_run)
+
+
 
 @app.get("/agent/status")
 def status():
@@ -150,7 +313,7 @@ def screen_texts():
 def click_text(payload: ClickTextRequest):
     def _run():
         require_autocom_window()
-        win = connect_autocom_window()
+        win = connect_autocom_window(focus=False)
         matches = find_text_controls_in_region(
             win=win,
             target_text=payload.text,

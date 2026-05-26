@@ -15,7 +15,7 @@ def _runtime_root_dir() -> Path:
       project root
 
     PyInstaller onedir mode:
-      dist/\u003cAppName>/_internal
+      dist/<AppName>/_internal
 
     This root is used for bundled resources such as app/web_admin/dist.
     """
@@ -31,11 +31,11 @@ def _env_search_dirs(root_dir: Path) -> list[Path]:
       project root
 
     PyInstaller test mode:
-      dist/\u003cAppName>/.env
+      dist/<AppName>/.env
       dist/.env
 
     Installed mode:
-      C:/Program Files/AutocomBridge/\u003cAppName>/.env
+      C:/Program Files/AutocomBridge/<AppName>/.env
       C:/Program Files/AutocomBridge/.env
     """
     if _is_frozen():
