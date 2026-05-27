@@ -19,6 +19,7 @@ from app.bridge.schemas import (
     VehicleSelectionRequest,
     VinSelectionRequest,
 )
+from app.diagnostic_logging import get_file_logger
 from app.device.clients import list_clients, revoke_client, verify_client_token
 from app.device.identity import public_identity
 from app.device.pairing import claim_pairing, get_pairing_status, start_pairing
@@ -27,21 +28,41 @@ from app.security.admin_auth import (
     get_or_create_admin_secret,
     revoke_admin_session,
     validate_admin_session,
+    validate_admin_session_with_reason,
 )
 from app.settings import ensure_runtime_dirs, settings
 from app.engine.profiles import ENGINE_LABELS, list_engine_profiles, save_engine_profile
 
 
 ensure_runtime_dirs()
-get_or_create_admin_secret()
+diagnostic_log = get_file_logger(
+    "diagnostic_engine_console.bridge",
+    settings.log_dir / "bridge-diagnostics.log",
+)
+diagnostic_log.info(
+    "Bridge startup app_env=%s env_file=%s data_dir=%s bridge=%s:%s agent=%s native_api=%s signalr=%s",
+    settings.app_env,
+    settings.loaded_env_file or "not-found",
+    settings.data_dir,
+    settings.bridge_host,
+    settings.bridge_port,
+    settings.agent_base_url,
+    settings.autocom_api_base,
+    settings.autocom_signalr_base,
+)
+try:
+    get_or_create_admin_secret()
+except Exception:
+    diagnostic_log.exception("Bridge startup failed while creating or reading the local admin secret.")
+    raise
 
 rest_client = AutocomRestClient()
 signalr_client = ClassicSignalRClient()
 
 app = FastAPI(
-    title="Diagnostic Bridge Service",
+    title="Diagnostic Engine Console",
     version="0.1.0",
-    description="Local diagnostic bridge service and desktop automation gateway.",
+    description="Local Diagnostic Engine Console bridge service and desktop automation gateway.",
 )
 
 bridge_auth_scheme = HTTPBearer(
@@ -56,6 +77,14 @@ if admin_assets_dir.exists():
         "/admin/assets",
         StaticFiles(directory=str(admin_assets_dir)),
         name="admin-assets",
+    )
+
+mobile_assets_dir = settings.web_mobile_dist_dir / "assets"
+if mobile_assets_dir.exists():
+    app.mount(
+        "/mobile/assets",
+        StaticFiles(directory=str(mobile_assets_dir)),
+        name="mobile-assets",
     )
 
 
@@ -79,6 +108,28 @@ def admin_root():
 @app.get("/admin/{path:path}", include_in_schema=False)
 def admin_spa_fallback(path: str):
     return serve_admin_index()
+
+
+def serve_mobile_index():
+    if not settings.web_mobile_index_file.exists():
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "MOBILE_UI_NOT_BUILT",
+                "message": "Mobile Portal is not built yet. Run pnpm run build:mobile inside admin-ui.",
+            },
+        )
+    return FileResponse(settings.web_mobile_index_file)
+
+
+@app.get("/mobile", include_in_schema=False)
+def mobile_root():
+    return serve_mobile_index()
+
+
+@app.get("/mobile/{path:path}", include_in_schema=False)
+def mobile_spa_fallback(path: str):
+    return serve_mobile_index()
 
 
 class ClickTextRequest(BaseModel):
@@ -148,6 +199,11 @@ def extract_bearer_token(
 def require_loopback(request: Request) -> None:
     host = request.client.host if request.client else ""
     if host not in {"127.0.0.1", "::1"}:
+        diagnostic_log.warning(
+            "Rejected non-loopback admin access path=%s client=%s",
+            request.url.path,
+            host or "unknown",
+        )
         raise HTTPException(
             status_code=403,
             detail={
@@ -163,13 +219,27 @@ def require_admin_session(
 ) -> dict:
     require_loopback(request)
     cookie_value = request.cookies.get(settings.admin_session_cookie_name)
+    valid, reason = validate_admin_session_with_reason(
+        cookie_value,
+        x_csrf_token,
+        require_csrf=True,
+    )
 
-    if not validate_admin_session(cookie_value, x_csrf_token, require_csrf=True):
+    if not valid:
+        diagnostic_log.warning(
+            "Admin session rejected path=%s client=%s reason=%s cookie_present=%s csrf_present=%s",
+            request.url.path,
+            request.client.host if request.client else "unknown",
+            reason,
+            bool(cookie_value),
+            bool(x_csrf_token),
+        )
         raise HTTPException(
             status_code=401,
             detail={
                 "code": "INVALID_ADMIN_SESSION",
                 "message": "Local Admin Console session is missing or expired.",
+                "reason": reason,
             },
         )
 
@@ -183,7 +253,12 @@ def require_token(
     x_csrf_token: str | None = Header(default=None, alias="X-CSRF-Token"),
 ):
     admin_cookie = request.cookies.get(settings.admin_session_cookie_name)
-    if validate_admin_session(admin_cookie, x_csrf_token, require_csrf=True):
+    admin_valid, admin_reason = validate_admin_session_with_reason(
+        admin_cookie,
+        x_csrf_token,
+        require_csrf=True,
+    )
+    if admin_valid:
         return {"type": "admin"}
 
     supplied_token = extract_bearer_token(credentials, authorization)
@@ -192,14 +267,53 @@ def require_token(
     if client:
         return {"type": "client", "client": client}
 
+    diagnostic_log.warning(
+        "Bridge token rejected path=%s client=%s admin_reason=%s cookie_present=%s csrf_present=%s bearer_present=%s",
+        request.url.path,
+        request.client.host if request.client else "unknown",
+        admin_reason,
+        bool(admin_cookie),
+        bool(x_csrf_token),
+        bool(supplied_token),
+    )
     raise HTTPException(
         status_code=401,
         detail={
             "code": "INVALID_BRIDGE_TOKEN",
             "message": "Invalid local admin session or paired-device token.",
             "expected_header": "Authorization: Bearer <paired-device-token>",
+            "admin_session_reason": admin_reason,
         },
     )
+
+def require_paired_client(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Security(bridge_auth_scheme),
+    authorization: str | None = Header(default=None, include_in_schema=False),
+) -> dict:
+    supplied_token = extract_bearer_token(credentials, authorization)
+    client = verify_client_token(supplied_token or "")
+    if client:
+        return client
+
+    diagnostic_log.warning(
+        "Mobile token rejected path=%s client=%s bearer_present=%s",
+        request.url.path,
+        request.client.host if request.client else "unknown",
+        bool(supplied_token),
+    )
+    raise HTTPException(
+        status_code=401,
+        detail={
+            "code": "INVALID_MOBILE_TOKEN",
+            "message": "This mobile session is no longer paired. Scan a fresh QR code from the PC console.",
+        },
+    )
+
+
+def _call_name(fn) -> str:
+    return getattr(fn, "__qualname__", getattr(fn, "__name__", repr(fn)))
+
 
 def safe_call(fn, *args, **kwargs):
     try:
@@ -207,7 +321,48 @@ def safe_call(fn, *args, **kwargs):
     except HTTPException:
         raise
     except Exception as exc:
+        diagnostic_log.exception("Dependency call failed callable=%s", _call_name(fn))
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+def diagnostic_engine_call(fn, *args, **kwargs):
+    try:
+        return fn(*args, **kwargs)
+    except HTTPException:
+        raise
+    except requests.exceptions.RequestException as exc:
+        diagnostic_log.exception(
+            "Diagnostic Engine Console local API request failed callable=%s endpoint=%s",
+            _call_name(fn),
+            settings.autocom_api_base,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": "DIAGNOSTIC_ENGINE_LOCAL_API_UNAVAILABLE",
+                "message": (
+                    "Diagnostic Engine Console local API is unavailable at "
+                    f"{settings.autocom_api_base}. Open the configured engine and confirm its local API is listening."
+                ),
+                "endpoint": settings.autocom_api_base,
+                "reason": str(exc),
+            },
+        )
+    except Exception as exc:
+        diagnostic_log.exception(
+            "Diagnostic Engine Console local API response failed callable=%s endpoint=%s",
+            _call_name(fn),
+            settings.autocom_api_base,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": "DIAGNOSTIC_ENGINE_LOCAL_API_FAILED",
+                "message": "Diagnostic Engine Console local API returned an unusable response.",
+                "endpoint": settings.autocom_api_base,
+                "reason": str(exc),
+            },
+        )
 
 
 VEHICLE_LIST_TYPES = {
@@ -284,11 +439,19 @@ def agent_request(method: str, path: str, json_body=None, timeout: int = 15):
         except Exception:
             detail = response.text if response is not None else str(exc)
 
+        diagnostic_log.warning(
+            "Desktop Agent HTTP failure method=%s url=%s status=%s detail=%s",
+            method,
+            url,
+            response.status_code if response is not None else "unknown",
+            detail,
+        )
         raise HTTPException(
             status_code=response.status_code if response is not None else 502,
             detail=detail,
         )
     except requests.exceptions.RequestException as exc:
+        diagnostic_log.exception("Desktop Agent unreachable method=%s url=%s", method, url)
         raise HTTPException(
             status_code=502,
             detail=f"Desktop Agent request failed: {exc}",
@@ -296,18 +459,7 @@ def agent_request(method: str, path: str, json_body=None, timeout: int = 15):
 
 
 def autocom_get(path: str):
-    url = settings.autocom_api_base + path
-    try:
-        response = requests.get(url, timeout=15)
-        response.raise_for_status()
-        if not response.content:
-            return None
-        return response.json()
-    except Exception as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Autocom local API request failed: {exc}",
-        )
+    return diagnostic_engine_call(rest_client.get, path)
 
 @app.get("/bridge/public/identity")
 def bridge_public_identity():
@@ -317,6 +469,11 @@ def bridge_public_identity():
 def bridge_admin_session(response: Response, request: Request):
     require_loopback(request)
     session = create_admin_session()
+    diagnostic_log.info(
+        "Issued local admin session client=%s expires_at=%s",
+        request.client.host if request.client else "unknown",
+        session["expires_at"],
+    )
     response.set_cookie(
         key=settings.admin_session_cookie_name,
         value=session["cookie_value"],
@@ -350,14 +507,21 @@ def bridge_pairing_start(_: dict = Depends(require_admin_session)):
 
 
 @app.post("/bridge/pairing/claim")
-def bridge_pairing_claim(payload: PairingClaimRequest):
+def bridge_pairing_claim(payload: PairingClaimRequest, request: Request):
     try:
-        return claim_pairing(
+        paired = claim_pairing(
             pairing_id=payload.pairing_id,
             pairing_secret=payload.pairing_secret,
             client_name=payload.client_name,
             client_type=payload.client_type,
         )
+        diagnostic_log.info(
+            "Mobile paired client_id=%s client_type=%s remote=%s",
+            paired["client_id"],
+            paired["client_type"],
+            request.client.host if request.client else "unknown",
+        )
+        return paired
     except ValueError as exc:
         code = str(exc)
         status_code = 401 if code == "INVALID_PAIRING_SECRET" else 404
@@ -368,6 +532,21 @@ def bridge_pairing_claim(payload: PairingClaimRequest):
                 "message": "Pairing session is invalid, expired, already claimed, or secret did not match.",
             },
         )
+
+
+@app.get("/bridge/mobile/session")
+def bridge_mobile_session(client: dict = Depends(require_paired_client)):
+    native_api_status = rest_client.health()
+    return {
+        "paired": True,
+        "device": public_identity(),
+        "client": client,
+        "engine": {
+            "local_api_reachable": bool(native_api_status.get("ok")),
+            "local_api_endpoint": settings.autocom_api_base,
+            "local_api_error": None if native_api_status.get("ok") else native_api_status.get("error"),
+        },
+    }
 
 
 @app.get("/bridge/clients")
@@ -391,7 +570,7 @@ def bridge_revoke_client(client_id: str, _: dict = Depends(require_admin_session
 
 
 @app.get("/bridge/status")
-def bridge_status(_: bool = Depends(require_token)):
+def bridge_status(_: dict = Depends(require_admin_session)):
     agent_status = None
     agent_error = None
 
@@ -413,12 +592,12 @@ def bridge_status(_: bool = Depends(require_token)):
 
 
 @app.get("/bridge/agent/status")
-def bridge_agent_status(_: bool = Depends(require_token)):
+def bridge_agent_status(_: dict = Depends(require_admin_session)):
     return agent_request("GET", "/agent/status")
 
 
 @app.get("/bridge/screen/texts")
-def bridge_screen_texts(_: bool = Depends(require_token)):
+def bridge_screen_texts(_: dict = Depends(require_admin_session)):
     return agent_request("GET", "/agent/screen/texts")
 
 @app.get("/bridge/admin/trace/windows")
@@ -581,24 +760,24 @@ def bridge_rtd_select_location(
 
 
 @app.post("/bridge/generic-obd/start")
-def bridge_generic_obd(_: bool = Depends(require_token)):
+def bridge_generic_obd(_: dict = Depends(require_admin_session)):
     return agent_request("POST", "/agent/generic-obd/start")
 
 @app.post("/bridge/hardware/search-vci")
-def bridge_hardware_search_vci(_: bool = Depends(require_token)):
+def bridge_hardware_search_vci(_: dict = Depends(require_admin_session)):
     return agent_request("POST", "/agent/hardware/search-vci")
 
 @app.post("/bridge/hardware/test-vci")
-def bridge_hardware_test_vci(_: bool = Depends(require_token)):
+def bridge_hardware_test_vci(_: dict = Depends(require_admin_session)):
     return agent_request("POST", "/agent/hardware/test-vci")
 
 @app.post("/bridge/ui/click-text")
-def bridge_click_text(payload: ClickTextRequest, _: bool = Depends(require_token)):
+def bridge_click_text(payload: ClickTextRequest, _: dict = Depends(require_admin_session)):
     return agent_request("POST", "/agent/ui/click-text", payload.model_dump())
 
 
 @app.post("/bridge/ui/click-point")
-def bridge_click_point(payload: ClickPointRequest, _: bool = Depends(require_token)):
+def bridge_click_point(payload: ClickPointRequest, _: dict = Depends(require_admin_session)):
     return agent_request("POST", "/agent/ui/click-point", payload.model_dump())
 
 
@@ -608,85 +787,100 @@ def autocom_product(_: bool = Depends(require_token)):
 
 @app.get("/bridge/translations/{text_id}")
 def translation(text_id: int, _: bool = Depends(require_token)):
-    return safe_call(rest_client.get_translation, text_id)
+    return diagnostic_engine_call(rest_client.get_translation, text_id)
 
 
 @app.post("/bridge/vehicles/favourites/add")
 def add_favourite(payload: FavouriteRequest, _: bool = Depends(require_token)):
-    return safe_call(rest_client.add_favourite, payload.id)
+    return diagnostic_engine_call(rest_client.add_favourite, payload.id)
 
 
 @app.post("/bridge/vehicles/favourites/remove")
 def remove_favourite(payload: FavouriteRequest, _: bool = Depends(require_token)):
-    return safe_call(rest_client.remove_favourite, payload.id)
+    return diagnostic_engine_call(rest_client.remove_favourite, payload.id)
 
 
 @app.get("/bridge/vin/isavailable")
 def vin_available(_: bool = Depends(require_token)):
-    return safe_call(rest_client.get_vin_available)
+    return diagnostic_engine_call(rest_client.get_vin_available)
 
 
 @app.get("/bridge/vin/history")
 def vin_history(_: bool = Depends(require_token)):
-    return safe_call(rest_client.get_vin_history)
+    return diagnostic_engine_call(rest_client.get_vin_history)
 
 
 @app.get("/bridge/vrm/isavailable")
 def vrm_available(_: bool = Depends(require_token)):
-    return safe_call(rest_client.get_vrm_available)
+    return diagnostic_engine_call(rest_client.get_vrm_available)
 
 
 @app.get("/bridge/vrm/history")
 def vrm_history(_: bool = Depends(require_token)):
-    return safe_call(rest_client.get_vrm_history)
+    return diagnostic_engine_call(rest_client.get_vrm_history)
 
 
 @app.get("/bridge/history")
 def history(_: bool = Depends(require_token)):
-    return safe_call(rest_client.get_history)
+    return diagnostic_engine_call(rest_client.get_history)
 
 
 @app.post("/bridge/history/remove/{history_id}")
 def remove_history(history_id: str, _: bool = Depends(require_token)):
-    return safe_call(rest_client.remove_history, history_id)
+    return diagnostic_engine_call(rest_client.remove_history, history_id)
 
 
 @app.get("/bridge/vehicles/{vehicle_definition_id}/guide")
 def guide(vehicle_definition_id: str, _: bool = Depends(require_token)):
-    return safe_call(rest_client.get_guide, vehicle_definition_id)
+    return diagnostic_engine_call(rest_client.get_guide, vehicle_definition_id)
 
 
 @app.get("/bridge/vehicles/{vehicle_definition_id}/capabilities")
 def capabilities(vehicle_definition_id: str, protocol: str | None = None, _: bool = Depends(require_token)):
-    return safe_call(rest_client.get_capabilities, vehicle_definition_id, protocol)
+    return diagnostic_engine_call(rest_client.get_capabilities, vehicle_definition_id, protocol)
 
 
 @app.get("/bridge/vehicles/{vehicle_definition_id}/obd-functions")
 def obd_functions(vehicle_definition_id: str, protocol: str | None = None, _: bool = Depends(require_token)):
-    return safe_call(rest_client.get_obd_functions, vehicle_definition_id, protocol)
+    return diagnostic_engine_call(rest_client.get_obd_functions, vehicle_definition_id, protocol)
 
 
 @app.get("/bridge/vehicles/{vehicle_definition_id}/rtd-functions")
 def rtd_functions(vehicle_definition_id: str, protocol: str | None = None, _: bool = Depends(require_token)):
-    return safe_call(rest_client.get_rtd_functions, vehicle_definition_id, protocol)
+    return diagnostic_engine_call(rest_client.get_rtd_functions, vehicle_definition_id, protocol)
 
 
 @app.get("/bridge/vehicles/{list_type}")
 def vehicle_selection_root(list_type: str, _: bool = Depends(require_token)):
     valid_type = require_vehicle_list_type(list_type)
-    return safe_call(rest_client.get_vehicle_selection, valid_type, "")
+    return diagnostic_engine_call(rest_client.get_vehicle_selection, valid_type, "")
 
 
 @app.get("/bridge/vehicles/{list_type}/{vehicle_id}")
 def vehicle_selection(list_type: str, vehicle_id: str, _: bool = Depends(require_token)):
     valid_type = require_vehicle_list_type(list_type)
-    return safe_call(rest_client.get_vehicle_selection, valid_type, vehicle_id)
+    return diagnostic_engine_call(rest_client.get_vehicle_selection, valid_type, vehicle_id)
 
 
 @app.post("/bridge/vehicles/select")
 def vehicle_selection_post(payload: VehicleSelectionRequest, _: bool = Depends(require_token)):
     valid_type = require_vehicle_list_type(payload.list_type)
-    return safe_call(rest_client.get_vehicle_selection, valid_type, payload.vehicle_id)
+    return diagnostic_engine_call(rest_client.get_vehicle_selection, valid_type, payload.vehicle_id)
+
+
+@app.post("/bridge/mobile/vehicles/activate")
+def mobile_activate_vehicle_context(payload: VehicleContextRequest, client: dict = Depends(require_paired_client)):
+    vehicle_definition_id = require_vehicle_definition_id(payload.vehicle_definition_id)
+    sent = safe_call(signalr_client.send, "carSelectionChanged", vehicle_definition_id)
+    diagnostic_log.info(
+        "Mobile vehicle context activated client_id=%s vehicle_definition_id=%s",
+        client["client_id"],
+        vehicle_definition_id,
+    )
+    return {
+        "active_vehicle_definition_id": vehicle_definition_id,
+        "sent": sent,
+    }
 
 
 @app.post("/bridge/admin/vehicles/activate")
@@ -703,14 +897,14 @@ def admin_activate_vehicle_context(payload: VehicleContextRequest, _: dict = Dep
 def admin_open_vehicle_rtd(payload: RtdFunctionOpenRequest, _: dict = Depends(require_admin_session)):
     vehicle_definition_id = require_vehicle_definition_id(payload.vehicle_definition_id)
     selection_sent = safe_call(signalr_client.send, "carSelectionChanged", vehicle_definition_id)
-    functions = safe_call(rest_client.get_rtd_functions, vehicle_definition_id, payload.protocol)
+    functions = diagnostic_engine_call(rest_client.get_rtd_functions, vehicle_definition_id, payload.protocol)
 
     if not isinstance(functions, list):
         raise HTTPException(
             status_code=409,
             detail={
                 "code": "RTD_FUNCTION_LIST_UNAVAILABLE",
-                "message": "Autocom did not return an RTD function list for the active vehicle context.",
+                "message": "Diagnostic Engine Console did not return an RTD function list for the active vehicle context.",
             },
         )
 
@@ -756,31 +950,31 @@ def admin_read_vin(_: dict = Depends(require_admin_session)):
 
 @app.get("/bridge/limitations/can-erase-faultcodes")
 def can_erase_faultcodes(_: bool = Depends(require_token)):
-    return safe_call(rest_client.can_erase_faultcodes)
+    return diagnostic_engine_call(rest_client.can_erase_faultcodes)
 
 
 @app.post("/bridge/signalr/connect")
-def signalr_connect(_: bool = Depends(require_token)):
+def signalr_connect(_: dict = Depends(require_admin_session)):
     return safe_call(signalr_client.connect)
 
 
 @app.post("/bridge/signalr/disconnect")
-def signalr_disconnect(_: bool = Depends(require_token)):
+def signalr_disconnect(_: dict = Depends(require_admin_session)):
     return safe_call(signalr_client.disconnect)
 
 
 @app.get("/bridge/signalr/status")
-def signalr_status(_: bool = Depends(require_token)):
+def signalr_status(_: dict = Depends(require_admin_session)):
     return signalr_client.status()
 
 
 @app.post("/bridge/signalr/send")
-def signalr_send(payload: SignalRSendRequest, _: bool = Depends(require_token)):
+def signalr_send(payload: SignalRSendRequest, _: dict = Depends(require_admin_session)):
     return safe_call(signalr_client.send, payload.event, payload.data)
 
 
 @app.post("/bridge/diagnostics/run")
-def run_diagnosis(payload: RunDiagnosisRequest, _: bool = Depends(require_token)):
+def run_diagnosis(payload: RunDiagnosisRequest, _: dict = Depends(require_admin_session)):
     return safe_call(
         signalr_client.send_run_diagnosis,
         payload.function_name,
@@ -829,6 +1023,16 @@ def bridge_admin_health(_: dict = Depends(require_admin_session)):
     except HTTPException as exc:
         agent_error = exc.detail
 
+    native_api_status = rest_client.health()
+    native_api_reachable = bool(native_api_status.get("ok"))
+    native_api_error = None if native_api_reachable else native_api_status.get("error")
+    if not native_api_reachable:
+        diagnostic_log.warning(
+            "Health check: local API unavailable endpoint=%s error=%s",
+            settings.autocom_api_base,
+            native_api_error,
+        )
+
     active_clients = [
         client for client in list_clients()
         if not client.get("revoked")
@@ -837,13 +1041,27 @@ def bridge_admin_health(_: dict = Depends(require_admin_session)):
     window = (agent_status or {}).get("window") or {}
     engine_detected = bool(window.get("found"))
     agent_running = agent_status is not None and agent_error is None
+    engine_ready = engine_detected and native_api_reachable
 
-    if not agent_running:
+    if not agent_running or not native_api_reachable:
         overall = "blocked"
     elif not engine_detected or not active_clients:
         overall = "attention"
     else:
         overall = "healthy"
+
+    if not native_api_reachable:
+        engine_status = "blocked"
+        engine_message = (
+            "Diagnostic Engine Console local API is not listening at "
+            f"{settings.autocom_api_base}. Start the configured engine and retry."
+        )
+    elif not engine_detected:
+        engine_status = "attention"
+        engine_message = "Open or configure an engine target."
+    else:
+        engine_status = "healthy"
+        engine_message = "Configured engine and local API detected."
 
     return {
         "overall": overall,
@@ -853,13 +1071,25 @@ def bridge_admin_health(_: dict = Depends(require_admin_session)):
         },
         "desktop_agent": {
             "status": "healthy" if agent_running else "blocked",
-            "message": "Desktop agent is reachable." if agent_running else "Desktop agent is unavailable.",
+            "message": (
+                "Desktop agent is reachable."
+                if agent_running
+                else (
+                    "Desktop agent is unavailable. Check scheduled task "
+                    "DiagnosticEngineConsoleDesktopAgent and "
+                    f"{settings.agent_log_dir / 'desktop-agent.err.log'}."
+                )
+            ),
         },
         "engine": {
-            "status": "healthy" if engine_detected else "attention",
+            "status": engine_status,
             "detected": engine_detected,
+            "ready": engine_ready,
             "engine_label": window.get("engine_label"),
-            "message": "Configured engine detected." if engine_detected else "Open or configure an engine target.",
+            "local_api_reachable": native_api_reachable,
+            "local_api_endpoint": settings.autocom_api_base,
+            "local_api_error": native_api_error,
+            "message": engine_message,
         },
         "mobile_pairing": {
             "status": "healthy" if active_clients else "attention",

@@ -178,6 +178,14 @@ class Settings:
         return self.web_admin_dist_dir / "index.html"
 
     @property
+    def web_mobile_dist_dir(self) -> Path:
+        return self.root_dir / "app" / "web_mobile" / "dist"
+
+    @property
+    def web_mobile_index_file(self) -> Path:
+        return self.web_mobile_dist_dir / "index.html"
+
+    @property
     def output_dir(self) -> Path:
         return self.data_dir / "outputs"
 
@@ -188,6 +196,10 @@ class Settings:
     @property
     def log_dir(self) -> Path:
         return self.data_dir / "logs"
+
+    @property
+    def agent_log_dir(self) -> Path:
+        return self.data_dir / "agent-logs"
 
     @property
     def autocom_server_base(self) -> str:
@@ -225,3 +237,17 @@ def ensure_runtime_dirs() -> None:
     settings.output_dir.mkdir(parents=True, exist_ok=True)
     settings.screenshot_dir.mkdir(parents=True, exist_ok=True)
     settings.log_dir.mkdir(parents=True, exist_ok=True)
+    settings.agent_log_dir.mkdir(parents=True, exist_ok=True)
+
+
+def ensure_desktop_agent_runtime_dirs() -> None:
+    """
+    Prepare only directories that can be written by the interactive Desktop
+    Agent. Bridge identity, pairing data and admin secrets stay service-owned.
+    """
+    if settings.app_env != "production":
+        settings.storage_dir.mkdir(parents=True, exist_ok=True)
+
+    settings.output_dir.mkdir(parents=True, exist_ok=True)
+    settings.screenshot_dir.mkdir(parents=True, exist_ok=True)
+    settings.agent_log_dir.mkdir(parents=True, exist_ok=True)

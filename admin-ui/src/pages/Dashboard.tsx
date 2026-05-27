@@ -287,7 +287,10 @@ export default function Dashboard() {
                 : 'attention';
     const engineReady = connectionState === 'healthy';
     const activeClients = clients.filter((client) => !client.revoked);
-    const qrText = pairing ? JSON.stringify(pairing.qr_payload) : '';
+    const qrText = pairing ? pairing.pairing_url : '';
+    const pairingUsesLoopback = Boolean(
+        pairing && /\/\/(localhost|127\.0\.0\.1|\[::1\])(?::|\/)/i.test(pairing.pairing_url),
+    );
 
 
     return (
@@ -295,8 +298,8 @@ export default function Dashboard() {
             <header style={{marginBottom: 22}}>
                 <h2 style={{margin: 0, fontSize: 28}}>Connect a Mobile Device</h2>
                 <p style={{...muted, margin: '6px 0 0'}}>
-                    Check the computer setup, scan a QR code from the mobile app, and confirm the
-                    connected device below.
+                    Check the computer setup, scan a QR code with the phone camera, and use the
+                    Mobile Portal to browse vehicle selection.
                 </p>
             </header>
 
@@ -368,7 +371,7 @@ export default function Dashboard() {
                     <OnboardingStep
                         number={2}
                         title="Scan QR"
-                        description="Generate the QR code below and scan it from the mobile app."
+                        description="Generate the QR code below and scan it with the phone camera."
                     />
                     <OnboardingStep
                         number={3}
@@ -390,8 +393,8 @@ export default function Dashboard() {
                 <div style={card}>
                     <h3 style={{margin: '0 0 8px'}}>Step 2 — Pair your mobile device</h3>
                     <p style={{...muted, margin: '0 0 18px', lineHeight: 1.6}}>
-                        On your phone, open the mobile client and choose <strong>Pair Device</strong>.
-                        Then scan the QR code generated here.
+                        On your phone, use the camera to scan this QR code. It opens the secure,
+                        short-lived Mobile Portal pairing page automatically.
                     </p>
 
                     <div
@@ -426,11 +429,19 @@ export default function Dashboard() {
                     </button>
 
                     {pairing && (
-                        <p style={{...muted, margin: '14px 0 0'}}>
-                            Pairing status: <strong>{pairingStatus}</strong>
-                            <br/>
-                            QR expires at: <strong>{formatDate(pairing.expires_at)}</strong>
-                        </p>
+                        <>
+                            <p style={{...muted, margin: '14px 0 0'}}>
+                                Pairing status: <strong>{pairingStatus}</strong>
+                                <br/>
+                                QR expires at: <strong>{formatDate(pairing.expires_at)}</strong>
+                            </p>
+                            {pairingUsesLoopback && (
+                                <p style={{...muted, color: '#991b1b', marginTop: 10}}>
+                                    This QR uses localhost and cannot be opened from a phone. Set
+                                    <strong> BRIDGE_PUBLIC_HOST</strong> in the production environment to this PC&apos;s LAN IP.
+                                </p>
+                            )}
+                        </>
                     )}
                 </div>
 
@@ -461,6 +472,9 @@ export default function Dashboard() {
                                     }
                                 />
                             </div>
+                            <p style={{...muted, margin: '12px 0 0', wordBreak: 'break-all'}}>
+                                Opens: {pairing.pairing_url}
+                            </p>
                         </>
                     ) : (
                         <div

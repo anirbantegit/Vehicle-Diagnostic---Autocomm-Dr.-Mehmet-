@@ -20,7 +20,7 @@ export default function App() {
     }, []);
 
     if (sessionError) {
-        return <div className="p-8 text-red-700">Local Admin Console could not be started: {sessionError}</div>;
+        return <div className="p-8 text-red-700">Diagnostic Engine Console could not be started: {sessionError}</div>;
     }
 
     if (!sessionReady) {

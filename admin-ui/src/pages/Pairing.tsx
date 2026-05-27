@@ -105,14 +105,14 @@ export default function Pairing() {
         loadIdentity();
     }, []);
 
-    const qrText = pairing ? JSON.stringify(pairing.qr_payload) : '';
+    const qrText = pairing ? pairing.pairing_url : '';
 
     return (
         <div>
             <header style={{marginBottom: 22}}>
                 <h2 style={{margin: 0, fontSize: 28}}>Pairing</h2>
                 <p style={{color: '#64748b', margin: '6px 0 0', fontSize: 13}}>
-                    Generate a short-lived QR payload for mobile/web clients.
+                    Generate a short-lived QR link that opens the Mobile Portal on a phone.
                 </p>
             </header>
 
@@ -139,7 +139,7 @@ export default function Pairing() {
                 <section style={card}>
                     <h3 style={{marginTop: 0}}>QR Pairing</h3>
                     <p style={{color: '#64748b', fontSize: 13}}>
-                        Pairing expires quickly. Use this only while the technician is present.
+                        Pairing expires quickly. Scan this with the phone camera while the technician is present.
                     </p>
                     <p>
                         Pairing status: <strong>{pairingStatus}</strong>
@@ -164,6 +164,9 @@ export default function Pairing() {
 
                             <p style={{color: '#64748b', fontSize: 13}}>
                                 Expires at: <strong>{pairing.expires_at}</strong>
+                            </p>
+                            <p style={{color: '#64748b', fontSize: 12, wordBreak: 'break-all'}}>
+                                Opens: {pairing.pairing_url}
                             </p>
                         </div>
                     )}

@@ -2,7 +2,7 @@ import os
 import time
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 from pywinauto import Desktop
 
@@ -32,16 +32,52 @@ from app.config import (
     GENERIC_OBD_CLICK_Y,
     HARDWARE_SETUP_KEYWORDS,
 )
-from app.settings import ensure_runtime_dirs
+from app.diagnostic_logging import get_file_logger
+from app.settings import ensure_desktop_agent_runtime_dirs, settings
 
 
-ensure_runtime_dirs()
+ensure_desktop_agent_runtime_dirs()
+diagnostic_log = get_file_logger(
+    "diagnostic_engine_console.desktop_agent",
+    settings.agent_log_dir / "desktop-agent.runtime.log",
+)
+diagnostic_log.info(
+    "Desktop Agent startup pid=%s app_env=%s env_file=%s data_dir=%s bind=%s:%s",
+    os.getpid(),
+    settings.app_env,
+    settings.loaded_env_file or "not-found",
+    settings.data_dir,
+    settings.agent_host,
+    settings.agent_port,
+)
 
 app = FastAPI(
-    title="Diagnostic Desktop Agent",
+    title="Diagnostic Engine Console",
     version="0.1.0",
-    description="Local-only pywinauto automation agent. Bind only to 127.0.0.1.",
+    description="Diagnostic Engine Console desktop automation agent. Bind only to 127.0.0.1.",
 )
+
+
+@app.middleware("http")
+async def log_agent_http_failures(request: Request, call_next):
+    try:
+        response = await call_next(request)
+    except Exception:
+        diagnostic_log.exception(
+            "Unhandled Desktop Agent request failure method=%s path=%s",
+            request.method,
+            request.url.path,
+        )
+        raise
+
+    if response.status_code >= 400:
+        diagnostic_log.warning(
+            "Desktop Agent request rejected method=%s path=%s status=%s",
+            request.method,
+            request.url.path,
+            response.status_code,
+        )
+    return response
 
 
 class ClickTextRequest(BaseModel):
@@ -233,6 +269,10 @@ def safe_call(fn, *args, **kwargs):
     except HTTPException:
         raise
     except Exception as exc:
+        diagnostic_log.exception(
+            "Desktop Agent operation failed callable=%s",
+            getattr(fn, "__qualname__", getattr(fn, "__name__", repr(fn))),
+        )
         raise HTTPException(status_code=500, detail=str(exc))
 
 

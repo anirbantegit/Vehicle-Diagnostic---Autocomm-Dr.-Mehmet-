@@ -3,7 +3,7 @@ const EMBEDDED_SOFTWARE_IDENTIFIER = /autocom/gi;
 
 export const redactDisplayText = (value: string): string =>
     value
-        .replace(DISPLAY_SOFTWARE_NAME, 'Diagnostic Engine')
+        .replace(DISPLAY_SOFTWARE_NAME, 'Diagnostic Engine Console')
         .replace(EMBEDDED_SOFTWARE_IDENTIFIER, 'diagnostic_engine');
 
 export const redactDisplayValue = (value: unknown): unknown => {

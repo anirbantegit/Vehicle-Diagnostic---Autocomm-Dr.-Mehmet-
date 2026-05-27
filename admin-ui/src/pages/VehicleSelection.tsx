@@ -498,7 +498,7 @@ export default function VehicleSelection() {
         try {
             const result = await selectVehicleByVin(formatted);
             setDebugResponse(result);
-            setStatus('VIN lookup sent to Autocom. Waiting for the resolved vehicle path.');
+            setStatus('VIN lookup sent to Diagnostic Engine Console. Waiting for the resolved vehicle path.');
         } catch (exc) {
             setError(errorMessage(exc));
         } finally {
@@ -533,7 +533,7 @@ export default function VehicleSelection() {
         setError('');
         try {
             setDebugResponse(await readVinFromVehicle());
-            setStatus('VIN read requested. Complete the native VIN dialog in Autocom.');
+            setStatus('VIN read requested. Complete the native VIN dialog in Diagnostic Engine Console.');
         } catch (exc) {
             setError(errorMessage(exc));
         } finally {
@@ -603,9 +603,9 @@ export default function VehicleSelection() {
         if (message.event === 'carSelectionSet') {
             applyResolvedVinPath(data);
         } else if (message.event === 'carSelectionError' && data.trigger === 'setVin') {
-            setError('Autocom could not resolve the entered VIN into a vehicle selection.');
+            setError('Diagnostic Engine Console could not resolve the entered VIN into a vehicle selection.');
         } else if (message.event === 'vinReadError') {
-            setError('Autocom could not read a VIN from the connected vehicle.');
+            setError('Diagnostic Engine Console could not read a VIN from the connected vehicle.');
         } else if (message.event === 'setVinFromArgument' && typeof data.currentvin === 'string') {
             updateVin(data.currentvin);
         }
@@ -633,7 +633,7 @@ export default function VehicleSelection() {
             <header style={{marginBottom: 22}}>
                 <h2 style={{margin: 0, fontSize: 28}}>Vehicle Selection</h2>
                 <p style={{...muted, margin: '6px 0 0'}}>
-                    Reproduce the native Autocom path: select a vehicle manually or resolve it by VIN, then access connection guide and functions from the active context.
+                    Reproduce the native Diagnostic Engine Console path: select a vehicle manually or resolve it by VIN, then access connection guide and functions from the active context.
                 </p>
             </header>
 

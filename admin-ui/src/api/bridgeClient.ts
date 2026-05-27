@@ -4,6 +4,7 @@ const LEGACY_ADMIN_TOKEN_STORAGE_KEY = 'autocom_bridge_admin_token';
 const LEGACY_ACTION_LOG_STORAGE_KEY = 'autocom_bridge_action_logs';
 
 let adminCsrfToken = '';
+let adminSessionRefreshPromise: Promise<void> | null = null;
 
 const REDACTED_KEYS = new Set([
     'access_token',
@@ -39,6 +40,7 @@ export type PairingStartResponse = {
     pairing_id: string;
     expires_in: number;
     expires_at: string;
+    pairing_url: string;
     qr_payload: {
         v: number;
         type: string;
@@ -303,7 +305,16 @@ export type HealthResponse = {
     overall: HealthState;
     bridge: {status: HealthState; message: string};
     desktop_agent: {status: HealthState; message: string};
-    engine: {status: HealthState; detected: boolean; engine_label?: string | null; message: string};
+    engine: {
+        status: HealthState;
+        detected: boolean;
+        ready?: boolean;
+        engine_label?: string | null;
+        local_api_reachable?: boolean;
+        local_api_endpoint?: string;
+        local_api_error?: string | null;
+        message: string;
+    };
     mobile_pairing: {status: HealthState; active_devices: number; message: string};
     hardware: {status: HealthState; verification: string; message: string};
 };
@@ -347,6 +358,16 @@ export async function bootstrapAdminSession(): Promise<void> {
 
     const session = (await response.json()) as AdminSessionResponse;
     adminCsrfToken = session.csrf_token;
+}
+
+async function refreshAdminSessionOnce(): Promise<void> {
+    if (!adminSessionRefreshPromise) {
+        adminSessionRefreshPromise = bootstrapAdminSession().finally(() => {
+            adminSessionRefreshPromise = null;
+        });
+    }
+
+    return adminSessionRefreshPromise;
 }
 
 function nowLogId(): string {
@@ -500,6 +521,19 @@ function buildHeaders(options?: RequestInit, authenticated = true): HeadersInit 
     };
 }
 
+function nestedErrorCode(value: unknown): string | null {
+    if (!value || typeof value !== 'object') {
+        return null;
+    }
+
+    const candidate = value as {code?: unknown; detail?: unknown};
+    if (typeof candidate.code === 'string' && candidate.code.trim()) {
+        return candidate.code;
+    }
+
+    return nestedErrorCode(candidate.detail);
+}
+
 function nestedErrorMessage(value: unknown): string | null {
     if (typeof value === 'string' && value.trim()) {
         return value;
@@ -532,6 +566,7 @@ export async function bridgeRequest<T>(
     path: string,
     options: RequestInit = {},
     authenticated = true,
+    allowAdminSessionRefresh = true,
 ): Promise<T> {
     const method = (options.method || 'GET').toUpperCase();
     const requestBody = normalizeRequestBody(options.body);
@@ -569,6 +604,27 @@ export async function bridgeRequest<T>(
     }
 
     if (!response.ok) {
+        const errorCode = nestedErrorCode(data);
+        const recoverableAdminSession = authenticated
+            && allowAdminSessionRefresh
+            && response.status === 401
+            && (errorCode === 'INVALID_ADMIN_SESSION' || errorCode === 'INVALID_BRIDGE_TOKEN');
+
+        if (recoverableAdminSession) {
+            appendActionLog({
+                level: 'error',
+                source: 'bridgeClient',
+                action: 'refresh_admin_session_after_rejection',
+                method,
+                path,
+                response: data,
+                error: 'Local Admin Console session was rejected; creating one fresh session and retrying once.',
+                duration_ms: Math.round(performance.now() - startedAt),
+            });
+            await refreshAdminSessionOnce();
+            return bridgeRequest<T>(path, options, authenticated, false);
+        }
+
         const message = redactDisplayText(parseErrorMessage(data, response.status));
         appendActionLog({
             level: 'error',

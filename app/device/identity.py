@@ -50,7 +50,7 @@ def _fingerprint_hash(install_id: str, device_name: str) -> str:
 
 def _new_identity() -> dict:
     install_id = str(uuid.uuid4())
-    device_name = platform.node() or socket.gethostname() or "Diagnostic Bridge"
+    device_name = platform.node() or socket.gethostname() or "Diagnostic Engine Console"
     return {
         "device_id": f"brg_{uuid.uuid4().hex[:16]}",
         "install_id": install_id,
@@ -77,7 +77,7 @@ def get_identity() -> dict:
         changed = True
 
     if not identity.get("device_name"):
-        identity["device_name"] = platform.node() or socket.gethostname() or "Diagnostic Bridge"
+        identity["device_name"] = platform.node() or socket.gethostname() or "Diagnostic Engine Console"
         changed = True
 
     if not identity.get("fingerprint_hash"):

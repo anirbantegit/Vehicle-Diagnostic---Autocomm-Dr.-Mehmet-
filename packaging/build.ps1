@@ -12,7 +12,7 @@ function Assert-LastCommandOk {
 }
 
 function Stop-AutocomBridgeProcesses {
-    Write-Host "Stopping running Autocom Bridge processes..."
+    Write-Host "Stopping running Diagnostic Engine Console processes..."
 
     $processNames = @(
         "AutocomBridgeService",
@@ -106,6 +106,10 @@ Assert-LastCommandOk "pnpm install"
 pnpm build
 Assert-LastCommandOk "pnpm build"
 
+Write-Host "Building React Mobile Portal..."
+pnpm run build:mobile
+Assert-LastCommandOk "pnpm run build:mobile"
+
 Set-Location $Root
 
 Write-Host "Building Bridge executable..."
@@ -117,6 +121,7 @@ pyinstaller `
   --paths "$Root" `
   --collect-submodules app `
   --add-data "app\web_admin\dist;app\web_admin\dist" `
+  --add-data "app\web_mobile\dist;app\web_mobile\dist" `
   scripts\run_bridge.py
 Assert-LastCommandOk "Bridge PyInstaller build"
 
@@ -131,12 +136,36 @@ pyinstaller `
   scripts\run_desktop_agent.py
 Assert-LastCommandOk "Desktop Agent PyInstaller build"
 
-Write-Host "Copying packaging scripts..."
-New-Item -ItemType Directory -Force "$Root\dist\installer_payload\scripts" | Out-Null
-New-Item -ItemType Directory -Force "$Root\dist\installer_payload\tools" | Out-Null
+Write-Host "Copying packaging scripts and selected environment template..."
+$ProdEnvTemplate = Join-Path $Root ".env.prod"
+$FallbackEnvTemplate = Join-Path $Root ".env"
+if (Test-Path -LiteralPath $ProdEnvTemplate) {
+    $SelectedEnvTemplate = $ProdEnvTemplate
+    $SelectedPayloadName = ".env.prod"
+    $SelectedSourceName = ".env.prod"
+}
+elseif (Test-Path -LiteralPath $FallbackEnvTemplate) {
+    $SelectedEnvTemplate = $FallbackEnvTemplate
+    $SelectedPayloadName = ".env.fallback"
+    $SelectedSourceName = ".env"
+}
+else {
+    throw "No installer environment source found. Add .env.prod (preferred) or .env at the project root."
+}
 
-Copy-Item "$Root\packaging\scripts\*.ps1" "$Root\dist\installer_payload\scripts\" -Force
-Copy-Item "$Root\packaging\tools\nssm.exe" "$Root\dist\installer_payload\tools\" -Force
+$PayloadScriptsDir = Join-Path $Root "dist\installer_payload\scripts"
+$PayloadToolsDir = Join-Path $Root "dist\installer_payload\tools"
+$PayloadConfigDir = Join-Path $Root "dist\installer_payload\config"
+New-Item -ItemType Directory -Force $PayloadScriptsDir | Out-Null
+New-Item -ItemType Directory -Force $PayloadToolsDir | Out-Null
+New-Item -ItemType Directory -Force $PayloadConfigDir | Out-Null
+
+Remove-Item -LiteralPath (Join-Path $PayloadConfigDir ".env.prod") -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath (Join-Path $PayloadConfigDir ".env.fallback") -Force -ErrorAction SilentlyContinue
+Copy-Item "$Root\packaging\scripts\*.ps1" $PayloadScriptsDir -Force
+Copy-Item "$Root\packaging\tools\nssm.exe" $PayloadToolsDir -Force
+Copy-Item -LiteralPath $SelectedEnvTemplate -Destination (Join-Path $PayloadConfigDir $SelectedPayloadName) -Force
+Write-Host "Installer environment selected: $SelectedSourceName ($SelectedEnvTemplate)"
 
 Write-Host "Build complete."
 Write-Host "Next: compile packaging\installer\AutocomBridge.iss with Inno Setup."

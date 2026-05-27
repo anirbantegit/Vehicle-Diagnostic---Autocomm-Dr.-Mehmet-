@@ -11,7 +11,7 @@ from app.settings import settings
 
 def main():
     url = f"http://127.0.0.1:{settings.bridge_port}/admin"
-    print(f"Opening Autocom Bridge Admin: {url}")
+    print(f"Opening Diagnostic Engine Console: {url}")
     webbrowser.open(url)
 
 

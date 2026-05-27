@@ -1,6 +1,7 @@
 import hmac
 import secrets
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlencode
 
 from app.device.clients import create_client
 from app.device.identity import get_bridge_base_url, public_identity, utc_now_iso
@@ -45,17 +46,23 @@ def start_pairing() -> dict:
         "claimed": False,
     }
     _pairing_sessions[pairing_id] = session
+    base_url = get_bridge_base_url()
+    pairing_query = urlencode({
+        "pairing_id": pairing_id,
+        "pairing_secret": pairing_secret,
+    })
 
     return {
         "pairing_id": pairing_id,
         "expires_in": PAIRING_TTL_SECONDS,
         "expires_at": session["expires_at"],
+        "pairing_url": f"{base_url}/mobile/pair?{pairing_query}",
         "qr_payload": {
             "v": 1,
             "type": "diagnostic_bridge_pairing",
             "device_id": identity["device_id"],
             "device_name": identity["device_name"],
-            "base_url": get_bridge_base_url(),
+            "base_url": base_url,
             "pairing_id": pairing_id,
             "pairing_secret": pairing_secret,
             "expires_at": session["expires_at"],

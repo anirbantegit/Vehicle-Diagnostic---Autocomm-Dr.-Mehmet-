@@ -82,31 +82,51 @@ def create_admin_session() -> dict:
     }
 
 
+def validate_admin_session_with_reason(
+    cookie_value: str | None,
+    csrf_token: str | None = None,
+    require_csrf: bool = True,
+) -> tuple[bool, str]:
+    """Validate an admin session while returning a log-safe rejection reason."""
+    if not cookie_value or "." not in cookie_value:
+        return False, "cookie_missing_or_malformed"
+
+    session_id, supplied_signature = cookie_value.rsplit(".", 1)
+    expected_signature = _signed_session_token(session_id).rsplit(".", 1)[1]
+    if not hmac.compare_digest(supplied_signature, expected_signature):
+        return False, "cookie_signature_invalid"
+
+    session_key = _hash_value(cookie_value)
+    session = _admin_sessions.get(session_key)
+    if not session:
+        # Sessions are process-local. A browser cookie is stale after the
+        # Bridge Service restarts until the Admin UI creates a fresh session.
+        return False, "session_not_in_process_memory"
+
+    if session["expires_at"] <= _now():
+        _admin_sessions.pop(session_key, None)
+        return False, "session_expired"
+
+    if require_csrf:
+        if not csrf_token:
+            return False, "csrf_missing"
+        if not hmac.compare_digest(session["csrf_hash"], _hash_value(csrf_token)):
+            return False, "csrf_invalid"
+
+    return True, "valid"
+
+
 def validate_admin_session(
     cookie_value: str | None,
     csrf_token: str | None = None,
     require_csrf: bool = True,
 ) -> bool:
-    if not cookie_value or "." not in cookie_value:
-        return False
-
-    session_id, supplied_signature = cookie_value.rsplit(".", 1)
-    expected_signature = _signed_session_token(session_id).rsplit(".", 1)[1]
-    if not hmac.compare_digest(supplied_signature, expected_signature):
-        return False
-
-    session = _admin_sessions.get(_hash_value(cookie_value))
-    if not session or session["expires_at"] <= _now():
-        _admin_sessions.pop(_hash_value(cookie_value), None)
-        return False
-
-    if require_csrf:
-        if not csrf_token:
-            return False
-        if not hmac.compare_digest(session["csrf_hash"], _hash_value(csrf_token)):
-            return False
-
-    return True
+    valid, _ = validate_admin_session_with_reason(
+        cookie_value,
+        csrf_token,
+        require_csrf,
+    )
+    return valid
 
 
 def revoke_admin_session(cookie_value: str | None) -> None:
