@@ -108,7 +108,7 @@ def get_lan_ip() -> str:
 
 def get_bridge_base_url() -> str:
     host = settings.bridge_public_host.strip() or get_lan_ip()
-    return f"http://{host}:{settings.bridge_port}"
+    return f"{settings.bridge_public_scheme}://{host}:{settings.bridge_port}"
 
 
 def public_identity(status: str = "online") -> dict:

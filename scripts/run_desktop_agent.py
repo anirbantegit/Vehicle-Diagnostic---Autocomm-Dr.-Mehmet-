@@ -1,3 +1,4 @@
+import os
 import sys
 from pathlib import Path
 
@@ -13,8 +14,14 @@ from app.settings import settings, validate_runtime_settings
 
 
 def main():
+    # PyInstaller --noconsole builds have no terminal-backed stdio streams.
+    # Keep third-party server logging safe while the Desktop Agent runs invisibly.
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w", encoding="utf-8")
+
     validate_runtime_settings()
-    print(f"Loaded env file: {settings.loaded_env_file}")
     uvicorn.run(
         desktop_agent_app,
         host=settings.agent_host,

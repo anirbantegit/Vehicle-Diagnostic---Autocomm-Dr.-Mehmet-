@@ -130,6 +130,7 @@ pyinstaller `
   --noconfirm `
   --clean `
   --onedir `
+  --noconsole `
   --name AutocomDesktopAgent `
   --paths "$Root" `
   --collect-submodules app `

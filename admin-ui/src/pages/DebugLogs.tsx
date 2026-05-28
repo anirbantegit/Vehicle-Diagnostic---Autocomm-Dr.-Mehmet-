@@ -2,8 +2,10 @@ import React, {useEffect, useMemo, useState} from 'react';
 import {
     ActionLogEntry,
     clearActionLogs,
+    clearServerActionLogs,
     downloadActionLogs,
     getActionLogs,
+    getServerActionLogs,
     subscribeActionLogs,
 } from '../api/bridgeClient';
 
@@ -52,6 +54,9 @@ function levelStyle(level: ActionLogEntry['level']): React.CSSProperties {
     if (level === 'success') {
         return {background: '#dcfce7', color: '#166534'};
     }
+    if (level === 'warning') {
+        return {background: '#fef3c7', color: '#92400e'};
+    }
     if (level === 'event') {
         return {background: '#dbeafe', color: '#1d4ed8'};
     }
@@ -70,17 +75,48 @@ function safePreview(value: unknown): string {
     }
 }
 
+function mergeLogs(serverLogs: ActionLogEntry[], localLogs: ActionLogEntry[]): ActionLogEntry[] {
+    const unique = new Map<string, ActionLogEntry>();
+    [...serverLogs, ...localLogs].forEach((entry) => unique.set(entry.id, entry));
+    return [...unique.values()].sort((left, right) => right.timestamp.localeCompare(left.timestamp));
+}
+
 export default function DebugLogs() {
-    const [logs, setLogs] = useState<ActionLogEntry[]>(getActionLogs());
+    const [localLogs, setLocalLogs] = useState<ActionLogEntry[]>(getActionLogs());
+    const [serverLogs, setServerLogs] = useState<ActionLogEntry[]>([]);
+    const [serverError, setServerError] = useState('');
     const [filter, setFilter] = useState('');
-    const [selected, setSelected] = useState<ActionLogEntry | null>(logs[0] || null);
+    const [selected, setSelected] = useState<ActionLogEntry | null>(null);
+    const logs = useMemo(() => mergeLogs(serverLogs, localLogs), [serverLogs, localLogs]);
+
+    async function refreshServerLogs(): Promise<void> {
+        try {
+            const entries = await getServerActionLogs();
+            setServerLogs(entries);
+            setServerError('');
+        } catch (exc) {
+            setServerError(exc instanceof Error ? exc.message : String(exc));
+        }
+    }
 
     useEffect(() => {
-        return subscribeActionLogs((nextLogs) => {
-            setLogs(nextLogs);
-            setSelected((current) => current || nextLogs[0] || null);
-        });
+        void refreshServerLogs();
+        const interval = window.setInterval(() => void refreshServerLogs(), 1500);
+        const unsubscribe = subscribeActionLogs((nextLogs) => setLocalLogs(nextLogs));
+        return () => {
+            window.clearInterval(interval);
+            unsubscribe();
+        };
     }, []);
+
+    useEffect(() => {
+        setSelected((current) => {
+            if (current && logs.some((entry) => entry.id === current.id)) {
+                return current;
+            }
+            return logs[0] || null;
+        });
+    }, [logs]);
 
     const filteredLogs = useMemo(() => {
         const keyword = filter.trim().toLowerCase();
@@ -97,8 +133,11 @@ export default function DebugLogs() {
                 log.method,
                 log.path,
                 log.error,
+                String(log.status_code ?? ''),
+                log.client,
                 safePreview(log.request),
                 safePreview(log.response),
+                safePreview(log.system_log),
             ]
                 .join(' ')
                 .toLowerCase()
@@ -106,8 +145,15 @@ export default function DebugLogs() {
         );
     }, [filter, logs]);
 
-    function handleClear() {
+    async function handleClear(): Promise<void> {
         clearActionLogs();
+        try {
+            await clearServerActionLogs();
+            setServerLogs([]);
+            setServerError('');
+        } catch (exc) {
+            setServerError(exc instanceof Error ? exc.message : String(exc));
+        }
         setSelected(null);
     }
 
@@ -116,28 +162,34 @@ export default function DebugLogs() {
             <header style={{marginBottom: 22}}>
                 <h2 style={{margin: 0, fontSize: 28}}>Super Logs</h2>
                 <p style={{color: '#64748b', margin: '6px 0 0', fontSize: 13}}>
-                    Captures admin actions, Bridge responses, errors, and diagnostic WebSocket events. Export this JSON when sharing debug data.
+                    Captures Admin Console actions plus server-side mobile/API outcomes, failures and diagnostic events.
+                    Mobile emulator failures remain visible here even when they happen in another browser tab.
                 </p>
             </header>
 
             <section style={{...card, marginBottom: 16}}>
                 <div style={{display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center'}}>
-                    <button type="button" style={button} onClick={downloadActionLogs}>
+                    <button type="button" style={button} onClick={() => downloadActionLogs(logs)}>
                         Export Debug JSON
                     </button>
-                    <button type="button" style={dangerButton} onClick={handleClear}>
+                    <button type="button" style={dangerButton} onClick={() => void handleClear()}>
                         Clear Logs
                     </button>
-                    <button type="button" style={secondaryButton} onClick={() => setLogs(getActionLogs())}>
+                    <button type="button" style={secondaryButton} onClick={() => void refreshServerLogs()}>
                         Refresh
                     </button>
                     <input
                         value={filter}
                         onChange={(event) => setFilter(event.target.value)}
-                        placeholder="Filter logs by path, action, response, error..."
+                        placeholder="Filter logs by path, status, request, response, warning or system log..."
                         style={{...input, flex: 1, minWidth: 260}}
                     />
                 </div>
+                {serverError && (
+                    <p style={{color: '#991b1b', fontSize: 12, margin: '12px 0 0'}}>
+                        Unable to read server-side logs: {serverError}
+                    </p>
+                )}
             </section>
 
             <div style={{display: 'grid', gridTemplateColumns: '460px 1fr', gap: 18, alignItems: 'start'}}>
@@ -146,7 +198,7 @@ export default function DebugLogs() {
 
                     <div style={{display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 650, overflow: 'auto'}}>
                         {filteredLogs.length === 0 && (
-                            <p style={{color: '#64748b'}}>No logs yet. Use the admin actions first.</p>
+                            <p style={{color: '#64748b'}}>No logs yet. Use the Admin Console or Mobile Portal first.</p>
                         )}
 
                         {filteredLogs.map((log) => (
@@ -179,10 +231,12 @@ export default function DebugLogs() {
                                 </div>
                                 <div style={{color: '#64748b', fontSize: 12, marginTop: 4}}>
                                     {log.method ? `${log.method} ` : ''}{log.path || log.source}
+                                    {typeof log.status_code === 'number' ? ` · HTTP ${log.status_code}` : ''}
                                 </div>
                                 <div style={{color: '#94a3b8', fontSize: 11, marginTop: 4}}>
                                     {log.timestamp}
                                     {typeof log.duration_ms === 'number' ? ` · ${log.duration_ms}ms` : ''}
+                                    {log.client ? ` · ${log.client}` : ''}
                                 </div>
                             </button>
                         ))}

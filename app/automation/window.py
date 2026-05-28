@@ -3,6 +3,7 @@ import time
 from contextlib import contextmanager
 
 import win32gui
+import win32process
 from pywinauto import Desktop
 
 from app.config import WINDOW_TITLE_RE
@@ -55,7 +56,70 @@ def describe_window(window) -> dict:
             "width": max(0, int(rect.right - rect.left)),
             "height": max(0, int(rect.bottom - rect.top)),
         },
+        "backend_sources": ["uia"],
     }
+
+
+def describe_native_window(handle: int) -> dict | None:
+    """Read authoritative top-level visibility/geometry without relying on UIA metadata."""
+    if not handle or not win32gui.IsWindow(handle):
+        return None
+    try:
+        title = (win32gui.GetWindowText(handle) or "").strip()
+        class_name = win32gui.GetClassName(handle) or ""
+        left, top, right, bottom = win32gui.GetWindowRect(handle)
+        _thread_id, pid = win32process.GetWindowThreadProcessId(handle)
+    except Exception:
+        return None
+
+    pattern = re.compile(WINDOW_TITLE_RE, re.IGNORECASE)
+    return {
+        "handle": int(handle),
+        "pid": int(pid) if pid else None,
+        "title": title,
+        "class_name": class_name,
+        "control_type": "Window",
+        "visible": bool(win32gui.IsWindowVisible(handle)),
+        "enabled": bool(win32gui.IsWindowEnabled(handle)),
+        "engine_candidate": bool(title and pattern.search(title)),
+        "engine_label": display_engine_label(title) if title and pattern.search(title) else None,
+        "rect": {
+            "left": int(left),
+            "top": int(top),
+            "right": int(right),
+            "bottom": int(bottom),
+            "width": max(0, int(right - left)),
+            "height": max(0, int(bottom - top)),
+        },
+        "backend_sources": ["win32"],
+    }
+
+
+def list_native_top_level_windows() -> list[dict]:
+    windows: list[dict] = []
+
+    def collect(handle, _context):
+        item = describe_native_window(int(handle))
+        if item is not None:
+            windows.append(item)
+        return True
+
+    win32gui.EnumWindows(collect, None)
+    return windows
+
+
+def _merge_window_item(current: dict | None, incoming: dict) -> dict:
+    if current is None:
+        return incoming
+    merged = {**current}
+    sources = list(dict.fromkeys([*current.get("backend_sources", []), *incoming.get("backend_sources", [])]))
+    # Win32 top-level metadata is the reliable source for visibility and bounds when
+    # the UIA provider reports a hidden zero-size shell for a visible native form.
+    if "win32" in incoming.get("backend_sources", []):
+        for key in ("title", "class_name", "pid", "visible", "enabled", "rect", "engine_candidate", "engine_label"):
+            merged[key] = incoming.get(key)
+    merged["backend_sources"] = sources
+    return merged
 
 
 def list_visible_windows(desktop):
@@ -84,29 +148,35 @@ def window_area_by_item(item: dict) -> int:
 
 
 def list_traceable_windows() -> list[dict]:
-    """List trace targets without hiding a configured engine that status already detected."""
+    """List visible/native targets and enrich unreliable UIA visibility through Win32."""
     desktop = Desktop(backend="uia")
-    windows: list[dict] = []
+    by_handle: dict[int, dict] = {}
 
     for window in desktop.windows():
         item = describe_window(window)
-        if not item["handle"] or not item["title"]:
-            continue
+        handle = item.get("handle")
+        if handle:
+            by_handle[handle] = _merge_window_item(by_handle.get(handle), item)
 
-        # Keep title-matched engine windows aligned with health detection.
-        # Some native UIA providers expose a readable title while reporting
-        # incomplete visibility/rectangle metadata; they are still valid
-        # trace targets to attempt.
-        if not item["engine_candidate"] and (
-            not item["visible"] or not _has_usable_rect(item)
+    for item in list_native_top_level_windows():
+        handle = item.get("handle")
+        if handle:
+            by_handle[handle] = _merge_window_item(by_handle.get(handle), item)
+
+    windows: list[dict] = []
+    for item in by_handle.values():
+        if not item.get("handle"):
+            continue
+        if not item.get("engine_candidate") and (
+            not item.get("visible") or not _has_usable_rect(item)
         ):
             continue
-
         windows.append(item)
 
     windows.sort(
         key=lambda item: (
-            bool(item["engine_candidate"]),
+            bool(item.get("engine_candidate")),
+            bool(item.get("visible")),
             _has_usable_rect(item),
             window_area_by_item(item),
         ),
@@ -165,7 +235,15 @@ def select_window_by_handle(desktop, handle: int):
     for window in desktop.windows():
         if int(getattr(window, "handle", 0) or 0) == handle:
             return window
-    raise RuntimeError(f"Selected window handle is no longer available: {handle}")
+
+    # Native blocking modal windows such as FormOBDFunction are visible through
+    # Win32 enumeration even when UIA does not list them as top-level windows.
+    # Attach directly by HWND so later scoped controls are never searched on the
+    # disabled background engine form.
+    try:
+        return desktop.window(handle=handle).wrapper_object()
+    except Exception as exc:
+        raise RuntimeError(f"Selected window handle is no longer available: {handle}") from exc
 
 
 def _prepare_window(win, focus: bool = False):

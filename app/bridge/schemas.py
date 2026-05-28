@@ -41,6 +41,7 @@ class VinSelectionRequest(BaseModel):
 
 class RtdFunctionOpenRequest(VehicleContextRequest):
     rtd_index: int
+    timeout_seconds: float = Field(default=6.0, ge=0.1, le=30.0)
 
 
 class RunDiagnosisRequest(BaseModel):

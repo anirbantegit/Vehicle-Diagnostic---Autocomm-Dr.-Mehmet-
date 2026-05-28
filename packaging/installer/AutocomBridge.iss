@@ -42,13 +42,25 @@ Name: "{commondesktop}\{#MyAppName}"; Filename: "powershell.exe"; Parameters: "-
 
 [Tasks]
 Name: "desktopicon"; Description: "Create desktop shortcut"; GroupDescription: "Additional shortcuts:"
+Name: "lanaccess"; Description: "Allow paired mobile devices on trusted local networks (Windows Defender Firewall)"; GroupDescription: "Mobile connection:"; Flags: checkedonce
+Name: "lanaccess\public"; Description: "Also allow mobile access while Windows marks the network as Public (less secure)"; GroupDescription: "Mobile connection:"; Flags: unchecked
 
 [Run]
 Filename: "powershell.exe"; Parameters: "-ExecutionPolicy Bypass -File ""{app}\scripts\create_env.ps1"""; Flags: runhidden waituntilterminated logoutput
 Filename: "powershell.exe"; Parameters: "-ExecutionPolicy Bypass -File ""{app}\scripts\install_service.ps1"""; Flags: runhidden waituntilterminated logoutput
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\configure_firewall.ps1"""; Flags: runhidden waituntilterminated logoutput; Tasks: lanaccess and not lanaccess\public
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\configure_firewall.ps1"" -AllowPublicProfile"; Flags: runhidden waituntilterminated logoutput; Tasks: lanaccess\public
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\remove_firewall.ps1"""; Flags: runhidden waituntilterminated logoutput; Tasks: not lanaccess
 Filename: "powershell.exe"; Parameters: "-ExecutionPolicy Bypass -File ""{app}\scripts\install_agent_task.ps1"""; Flags: runhidden waituntilterminated logoutput
 Filename: "powershell.exe"; Parameters: "-ExecutionPolicy Bypass -File ""{app}\scripts\open_admin.ps1"""; Description: "Open {#MyAppName}"; Flags: postinstall nowait skipifsilent
 
 [UninstallRun]
-Filename: "powershell.exe"; Parameters: "-ExecutionPolicy Bypass -File ""{app}\scripts\uninstall_agent_task.ps1"""; Flags: runhidden waituntilterminated; RunOnceId: "UninstallAgentTask"
-Filename: "powershell.exe"; Parameters: "-ExecutionPolicy Bypass -File ""{app}\scripts\uninstall_service.ps1"""; Flags: runhidden waituntilterminated; RunOnceId: "UninstallBridgeService"
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\remove_firewall.ps1"""; Flags: runhidden waituntilterminated; RunOnceId: "UninstallMobileLanFirewallRule"
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\uninstall_agent_task.ps1"""; Flags: runhidden waituntilterminated; RunOnceId: "UninstallAgentTask"
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\uninstall_service.ps1"""; Flags: runhidden waituntilterminated; RunOnceId: "UninstallBridgeService"
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\scripts\uninstall_cleanup.ps1"""; Flags: runhidden waituntilterminated; RunOnceId: "UninstallGeneratedData"
+
+[UninstallDelete]
+; Generated runtime configuration and any remaining installed files must not leave an orphan application folder.
+Type: files; Name: "{app}\.env"
+Type: filesandordirs; Name: "{app}"

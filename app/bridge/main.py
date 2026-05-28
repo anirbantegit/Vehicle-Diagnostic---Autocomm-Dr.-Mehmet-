@@ -1,4 +1,6 @@
 import asyncio
+import time
+
 import requests
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, Security, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
@@ -8,6 +10,7 @@ from pydantic import BaseModel, Field
 
 from app.autocom.rest_client import AutocomRestClient
 from app.autocom.signalr_legacy import ClassicSignalRClient
+from app.bridge.activity_logs import append_activity_log, clear_activity_logs, list_activity_logs
 from app.bridge.schemas import (
     EngineProfileRequest,
     FavouriteRequest,
@@ -20,7 +23,7 @@ from app.bridge.schemas import (
     VinSelectionRequest,
 )
 from app.diagnostic_logging import get_file_logger
-from app.device.clients import list_clients, revoke_client, verify_client_token
+from app.device.clients import list_clients, remove_client, verify_client_token
 from app.device.identity import public_identity
 from app.device.pairing import claim_pairing, get_pairing_status, start_pairing
 from app.security.admin_auth import (
@@ -65,27 +68,87 @@ app = FastAPI(
     description="Local Diagnostic Engine Console bridge service and desktop automation gateway.",
 )
 
+
+_ACTIVITY_EXCLUDED_PATHS = {
+    "/bridge/admin/super-logs",
+}
+
+
+def record_activity_safely(**entry):
+    try:
+        append_activity_log(**entry)
+    except Exception:
+        # Observability must never become the reason a diagnostic request fails.
+        diagnostic_log.exception("Unable to persist a Super Logs activity record.")
+
+
+@app.middleware("http")
+async def record_bridge_activity(request: Request, call_next):
+    """Persist API outcomes so admin Super Logs also covers mobile requests."""
+    path = request.url.path
+    if not path.startswith("/bridge/") or path in _ACTIVITY_EXCLUDED_PATHS:
+        return await call_next(request)
+
+    started_at = time.perf_counter()
+    remote = request.client.host if request.client else "unknown"
+    try:
+        response = await call_next(request)
+    except Exception as exc:
+        duration_ms = round((time.perf_counter() - started_at) * 1000)
+        record_activity_safely(
+            level="error",
+            source="bridge-server",
+            action="request_failed",
+            method=request.method,
+            path=path,
+            duration_ms=duration_ms,
+            client=remote,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        diagnostic_log.exception(
+            "Unhandled bridge request failure method=%s path=%s remote=%s",
+            request.method,
+            path,
+            remote,
+        )
+        raise
+
+    duration_ms = round((time.perf_counter() - started_at) * 1000)
+    record_activity_safely(
+        level="success" if response.status_code < 400 else "error",
+        source="bridge-server",
+        action="request_completed" if response.status_code < 400 else "request_rejected",
+        method=request.method,
+        path=path,
+        status_code=response.status_code,
+        duration_ms=duration_ms,
+        client=remote,
+    )
+    return response
+
+
 bridge_auth_scheme = HTTPBearer(
     auto_error=False,
     scheme_name="PairedDeviceBearerAuth",
     description="Bearer token issued only to a paired mobile client.",
 )
 
+# Keep UI asset routes registered in debug mode even when the developer starts
+# the bridge before running either Vite production build. Once a dist folder
+# is created, the already-running bridge can immediately serve its files.
 admin_assets_dir = settings.web_admin_dist_dir / "assets"
-if admin_assets_dir.exists():
-    app.mount(
-        "/admin/assets",
-        StaticFiles(directory=str(admin_assets_dir)),
-        name="admin-assets",
-    )
+app.mount(
+    "/admin/assets",
+    StaticFiles(directory=str(admin_assets_dir), check_dir=False),
+    name="admin-assets",
+)
 
 mobile_assets_dir = settings.web_mobile_dist_dir / "assets"
-if mobile_assets_dir.exists():
-    app.mount(
-        "/mobile/assets",
-        StaticFiles(directory=str(mobile_assets_dir)),
-        name="mobile-assets",
-    )
+app.mount(
+    "/mobile/assets",
+    StaticFiles(directory=str(mobile_assets_dir), check_dir=False),
+    name="mobile-assets",
+)
 
 
 def serve_admin_index():
@@ -129,6 +192,18 @@ def mobile_root():
 
 @app.get("/mobile/{path:path}", include_in_schema=False)
 def mobile_spa_fallback(path: str):
+    leaf_name = path.rsplit("/", 1)[-1]
+    if path.startswith("assets/") or "." in leaf_name:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "MOBILE_ASSET_NOT_FOUND",
+                "message": (
+                    f"Mobile Portal asset was not found: /mobile/{path}. "
+                    "Run pnpm run build:mobile and reload."
+                ),
+            },
+        )
     return serve_mobile_index()
 
 
@@ -168,6 +243,7 @@ class RtdPopupActionRequest(BaseModel):
     window_handle: int
     fallback_window_handle: int | None = None
     action: str
+    window_close_fallback: bool = False
 
 
 class RtdLocationRequest(BaseModel):
@@ -336,6 +412,13 @@ def diagnostic_engine_call(fn, *args, **kwargs):
             _call_name(fn),
             settings.autocom_api_base,
         )
+        record_activity_safely(
+            level="error",
+            source="diagnostic-engine",
+            action="native_api_unavailable",
+            path=settings.autocom_api_base,
+            error=f"{_call_name(fn)}: {exc}",
+        )
         raise HTTPException(
             status_code=502,
             detail={
@@ -353,6 +436,13 @@ def diagnostic_engine_call(fn, *args, **kwargs):
             "Diagnostic Engine Console local API response failed callable=%s endpoint=%s",
             _call_name(fn),
             settings.autocom_api_base,
+        )
+        record_activity_safely(
+            level="error",
+            source="diagnostic-engine",
+            action="native_api_response_failed",
+            path=settings.autocom_api_base,
+            error=f"{_call_name(fn)}: {exc}",
         )
         raise HTTPException(
             status_code=502,
@@ -439,23 +529,274 @@ def agent_request(method: str, path: str, json_body=None, timeout: int = 15):
         except Exception:
             detail = response.text if response is not None else str(exc)
 
+        status_code = response.status_code if response is not None else 502
+        system_message = (
+            f"Desktop Agent rejected {method} {path} with HTTP {status_code}. "
+            "The response and selector request are retained for native automation diagnosis."
+        )
         diagnostic_log.warning(
-            "Desktop Agent HTTP failure method=%s url=%s status=%s detail=%s",
+            "Desktop Agent HTTP failure method=%s url=%s status=%s request=%s detail=%s",
             method,
             url,
-            response.status_code if response is not None else "unknown",
+            status_code,
+            json_body,
             detail,
         )
-        raise HTTPException(
-            status_code=response.status_code if response is not None else 502,
-            detail=detail,
+        record_activity_safely(
+            level="warning" if status_code < 500 else "error",
+            source="desktop-agent",
+            action="desktop_agent_request_rejected",
+            method=method,
+            path=path,
+            status_code=status_code,
+            request=json_body,
+            response=detail,
+            error=system_message,
+            system_log={"logger": "bridge-diagnostics.log", "message": system_message},
         )
+        raise HTTPException(status_code=status_code, detail=detail)
     except requests.exceptions.RequestException as exc:
-        diagnostic_log.exception("Desktop Agent unreachable method=%s url=%s", method, url)
+        system_message = f"Desktop Agent request failed for {method} {path}: {exc}"
+        diagnostic_log.exception("Desktop Agent unreachable method=%s url=%s request=%s", method, url, json_body)
+        record_activity_safely(
+            level="error",
+            source="desktop-agent",
+            action="desktop_agent_unreachable",
+            method=method,
+            path=path,
+            status_code=502,
+            request=json_body,
+            error=system_message,
+            system_log={"logger": "bridge-diagnostics.log", "message": system_message},
+        )
         raise HTTPException(
             status_code=502,
-            detail=f"Desktop Agent request failed: {exc}",
+            detail={
+                "code": "DESKTOP_AGENT_UNREACHABLE",
+                "message": "Desktop Agent request failed.",
+                "reason": str(exc),
+            },
         )
+
+
+def find_engine_window_handle() -> int:
+    windows_response = agent_request("GET", "/agent/trace/windows", timeout=15)
+    windows = windows_response.get("windows", []) if isinstance(windows_response, dict) else []
+    engine_windows = [
+        window for window in windows
+        if isinstance(window, dict) and window.get("engine_candidate") and isinstance(window.get("handle"), int)
+    ]
+    interactive_windows = [
+        window for window in engine_windows
+        if window.get("visible")
+        and isinstance(window.get("rect"), dict)
+        and window["rect"].get("width", 0) > 0
+        and window["rect"].get("height", 0) > 0
+    ]
+    if interactive_windows:
+        interactive_windows.sort(
+            key=lambda window: window["rect"].get("width", 0) * window["rect"].get("height", 0),
+            reverse=True,
+        )
+        return interactive_windows[0]["handle"]
+    if engine_windows:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "ENGINE_WINDOW_NOT_INTERACTIVE",
+                "message": (
+                    "Only hidden or zero-size Diagnostic Engine Console windows were detected. "
+                    "Restore the active Cars/Trucks application window and retry the RTD action."
+                ),
+                "detected_engine_windows": engine_windows,
+            },
+        )
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "code": "ENGINE_WINDOW_NOT_FOUND",
+            "message": "No active Diagnostic Engine Console window is available for RTD popup control.",
+        },
+    )
+
+
+def require_rtd_function(vehicle_definition_id: str, rtd_index: int, protocol: str | None):
+    functions = diagnostic_engine_call(rest_client.get_rtd_functions, vehicle_definition_id, protocol)
+    if not isinstance(functions, list):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "RTD_FUNCTION_LIST_UNAVAILABLE",
+                "message": "Diagnostic Engine Console did not return an RTD function list for the active vehicle context.",
+            },
+        )
+
+    selected_function = next(
+        (
+            item for item in functions
+            if isinstance(item, dict) and str(item.get("index")) == str(rtd_index)
+        ),
+        None,
+    )
+    if selected_function is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "RTD_FUNCTION_NOT_FOUND",
+                "message": "The selected RTD function does not belong to the active vehicle context.",
+            },
+        )
+    return selected_function
+
+
+def active_native_blocking_popup() -> dict:
+    return agent_request("GET", "/agent/trace/blocking-native-popup", timeout=15)
+
+
+def require_no_blocking_native_popup(requested_action: str) -> None:
+    popup = active_native_blocking_popup()
+    if not popup.get("popup_open"):
+        return
+    identity = popup.get("popup_identity") if isinstance(popup.get("popup_identity"), dict) else None
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "code": "NATIVE_POPUP_BLOCKING_DESKTOP",
+            "message": (
+                "A native popup is blocking the Diagnostic Engine Console. "
+                "Complete or close that popup before running another desktop action."
+            ),
+            "requested_action": requested_action,
+            "popup_template": identity.get("kind") if identity else None,
+            "popup_state": popup,
+        },
+    )
+
+
+def native_popup_contract(
+    popup_screen: dict,
+    *,
+    sent=None,
+    command_sent: bool | None = None,
+    confirmation: str | None = None,
+    warning: str | None = None,
+) -> dict:
+    popup_open = bool(popup_screen.get("popup_open"))
+    identity = popup_screen.get("popup_identity") if isinstance(popup_screen.get("popup_identity"), dict) else None
+    is_confirmed_rtd = bool(popup_screen.get("confirmed")) and bool(identity and identity.get("kind") == "rtd_obd_function_popup")
+    action_controls = popup_screen.get("action_controls", {}) if is_confirmed_rtd else {}
+    available_actions = popup_screen.get("available_actions", []) if is_confirmed_rtd else []
+    window = popup_screen.get("window") if isinstance(popup_screen.get("window"), dict) else {}
+    result = {
+        "popup_open": popup_open,
+        "blocking": bool(popup_screen.get("blocking")) if popup_open else False,
+        "confirmed": is_confirmed_rtd,
+        "command_sent": command_sent,
+        "sent": sent,
+        "detection_method": popup_screen.get("detection_method"),
+        "popup_template": identity.get("kind") if identity else None,
+        "available_actions": available_actions,
+        "popup_window_handle": window.get("handle"),
+        "popup": popup_screen.get("matched_control") or window or None,
+        "popup_identity": identity,
+        "locations": popup_screen.get("locations", []) if is_confirmed_rtd else [],
+        "action_controls": action_controls,
+        "run_button": popup_screen.get("run_button") if is_confirmed_rtd else None,
+        "run_button_confirmed": isinstance(action_controls.get("run"), dict),
+        "screen": popup_screen,
+        "command_result": popup_screen.get("command_result"),
+    }
+    if not popup_open:
+        result["confirmation"] = confirmation or "The RTD native popup is no longer open."
+        result["warning"] = warning
+        return result
+    if is_confirmed_rtd:
+        result["confirmation"] = confirmation or "Native RTD popup detected through its verified control template."
+        result["warning"] = warning or popup_screen.get("warning")
+        return result
+    result["confirmation"] = "A blocking native popup was detected, but it is not yet mapped to an automation template."
+    result["warning"] = warning or popup_screen.get("warning") or (
+        "No action is enabled for an unclassified modal. Capture its trace and add a verified template first."
+    )
+    return result
+
+
+def open_native_rtd_popup(source_window_handle: int, rtd_index: int, timeout_seconds: float):
+    existing = active_native_blocking_popup()
+    if existing.get("popup_open"):
+        result = native_popup_contract(existing, sent=None, command_sent=False)
+        result["already_open"] = True
+        result["warning"] = (
+            "A native popup was already open, so no new RTD launch command was sent. "
+            "Handle the blocking popup first."
+        )
+        return result
+
+    before = agent_request("GET", "/agent/trace/windows", timeout=15)
+    baseline_windows = before.get("windows", []) if isinstance(before, dict) else []
+    baseline_handles = [
+        window["handle"]
+        for window in baseline_windows
+        if isinstance(window, dict) and isinstance(window.get("handle"), int)
+    ]
+    baseline_foreground_handle = before.get("foreground_window_handle") if isinstance(before, dict) else None
+
+    sent = safe_call(signalr_client.send, "viewRTDHelpDocument", rtd_index)
+    selector_request = {
+        "source_window_handle": source_window_handle,
+        "baseline_window_handles": baseline_handles,
+        "baseline_windows": baseline_windows,
+        "baseline_foreground_handle": baseline_foreground_handle,
+        "timeout_seconds": timeout_seconds,
+    }
+    try:
+        popup_screen = agent_request(
+            "POST",
+            "/agent/trace/find-rtd-popup",
+            selector_request,
+            timeout=max(15, round(timeout_seconds) + 5),
+        )
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, dict) else {"detail": exc.detail}
+        diagnostics = detail.setdefault("diagnostics", {})
+        diagnostics.update({
+            "rtd_index": rtd_index,
+            "signalr_send_result": sent,
+            "signalr_status_after_send": signalr_client.status(),
+            "source_window_handle": source_window_handle,
+            "selector_request": selector_request,
+        })
+        raise HTTPException(status_code=exc.status_code, detail=detail) from exc
+    result = native_popup_contract(popup_screen, sent=sent, command_sent=True)
+    result["already_open"] = bool(popup_screen.get("already_open"))
+    return result
+
+
+def invoke_native_rtd_popup_action(payload: RtdPopupActionRequest):
+    result = agent_request(
+        "POST",
+        f"/agent/trace/windows/{payload.window_handle}/rtd-popup-command",
+        {
+            "command": payload.action,
+            "fallback_window_handle": payload.fallback_window_handle,
+        },
+        timeout=30,
+    )
+    return native_popup_contract(result, command_sent=True)
+
+
+def select_native_rtd_location(payload: RtdLocationRequest):
+    result = agent_request(
+        "POST",
+        f"/agent/trace/windows/{payload.window_handle}/rtd-popup-command",
+        {
+            "command": "select_location",
+            "location_text": payload.location_text.strip(),
+            "fallback_window_handle": payload.fallback_window_handle,
+        },
+        timeout=30,
+    )
+    return native_popup_contract(result, command_sent=True)
 
 
 def autocom_get(path: str):
@@ -479,7 +820,7 @@ def bridge_admin_session(response: Response, request: Request):
         value=session["cookie_value"],
         httponly=True,
         samesite="strict",
-        secure=False,
+        secure=settings.bridge_tls_enabled,
         max_age=settings.admin_session_ttl_seconds,
         path="/",
     )
@@ -549,15 +890,31 @@ def bridge_mobile_session(client: dict = Depends(require_paired_client)):
     }
 
 
+@app.delete("/bridge/mobile/session")
+def bridge_disconnect_mobile_session(client: dict = Depends(require_paired_client)):
+    removed = remove_client(client["client_id"])
+    return {"disconnected": bool(removed)}
+
+
 @app.get("/bridge/clients")
 def bridge_clients(_: dict = Depends(require_admin_session)):
     return {"clients": list_clients()}
 
+@app.get("/bridge/admin/super-logs")
+def bridge_super_logs(_: dict = Depends(require_admin_session)):
+    return {"logs": list_activity_logs()}
 
-@app.post("/bridge/clients/{client_id}/revoke")
-def bridge_revoke_client(client_id: str, _: dict = Depends(require_admin_session)):
-    revoked = revoke_client(client_id)
-    if not revoked:
+
+@app.delete("/bridge/admin/super-logs")
+def bridge_clear_super_logs(_: dict = Depends(require_admin_session)):
+    clear_activity_logs()
+    return {"cleared": True}
+
+
+
+def _remove_paired_client(client_id: str) -> dict:
+    removed = remove_client(client_id)
+    if not removed:
         raise HTTPException(
             status_code=404,
             detail={
@@ -565,7 +922,18 @@ def bridge_revoke_client(client_id: str, _: dict = Depends(require_admin_session
                 "message": "Paired client was not found.",
             },
         )
-    return {"revoked": True, "client": revoked}
+    return {"removed": True, "client": removed}
+
+
+@app.delete("/bridge/clients/{client_id}")
+def bridge_remove_client(client_id: str, _: dict = Depends(require_admin_session)):
+    return _remove_paired_client(client_id)
+
+
+@app.post("/bridge/clients/{client_id}/revoke", include_in_schema=False)
+def bridge_revoke_client(client_id: str, _: dict = Depends(require_admin_session)):
+    # Compatibility route for an already-open older admin frontend bundle.
+    return _remove_paired_client(client_id)
 
 
 
@@ -625,6 +993,7 @@ def bridge_trace_window_click_point(
     payload: ClickPointRequest,
     _: dict = Depends(require_admin_session),
 ):
+    require_no_blocking_native_popup("trace_click_point")
     return agent_request(
         "POST",
         f"/agent/trace/windows/{window_handle}/click-point",
@@ -652,6 +1021,7 @@ def bridge_trace_window_control_action(
     payload: NativeControlRequest,
     _: dict = Depends(require_admin_session),
 ):
+    require_no_blocking_native_popup("trace_control_action")
     return agent_request(
         "POST",
         f"/agent/trace/windows/{window_handle}/control-action",
@@ -662,47 +1032,7 @@ def bridge_trace_window_control_action(
 
 @app.post("/bridge/admin/automation/rtd/open")
 def bridge_open_rtd_popup(payload: RtdOpenRequest, _: dict = Depends(require_admin_session)):
-    sent = safe_call(signalr_client.send, "viewRTDHelpDocument", payload.rtd_index)
-
-    # The RTD form is opened as its own native top-level window. Locate the
-    # window created by the source engine process instead of searching only
-    # beneath the original main-window HWND.
-    popup_screen = agent_request(
-        "POST",
-        "/agent/trace/find-window-control",
-        {
-            "source_window_handle": payload.window_handle,
-            "same_process": True,
-            "automation_id": "FormOBDFunction",
-            "control_type": "Window",
-            "present": True,
-            "timeout_seconds": payload.timeout_seconds,
-        },
-        timeout=35,
-    )
-    popup_window_handle = popup_screen["window"]["handle"]
-    run_screen = agent_request(
-        "POST",
-        f"/agent/trace/windows/{popup_window_handle}/wait-control",
-        {
-            "automation_id": "autocomButtonPlay",
-            "control_type": "Button",
-            "parent_automation_id": "FormOBDFunction",
-            "present": True,
-            "timeout_seconds": payload.timeout_seconds,
-        },
-        timeout=35,
-    )
-
-    return {
-        "sent": sent,
-        "confirmed": True,
-        "confirmation": "Native RTD popup and Run button were detected through UI Automation.",
-        "popup_window_handle": popup_window_handle,
-        "popup": popup_screen["matched_control"],
-        "run_button": run_screen["matched_control"],
-        "screen": run_screen,
-    }
+    return open_native_rtd_popup(payload.window_handle, payload.rtd_index, payload.timeout_seconds)
 
 
 @app.post("/bridge/admin/automation/rtd/popup-action")
@@ -710,34 +1040,7 @@ def bridge_rtd_popup_action(
     payload: RtdPopupActionRequest,
     _: dict = Depends(require_admin_session),
 ):
-    button_ids = {
-        "run": "autocomButtonPlay",
-        "select_vehicle": "autocomButtonNavigate",
-        "help": "autocomButtonHelp",
-        "cancel": "buttonClose",
-    }
-    automation_id = button_ids.get(payload.action)
-    if automation_id is None:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "code": "INVALID_RTD_POPUP_ACTION",
-                "message": "Unsupported RTD popup action.",
-            },
-        )
-
-    return agent_request(
-        "POST",
-        f"/agent/trace/windows/{payload.window_handle}/control-action",
-        {
-            "automation_id": automation_id,
-            "control_type": "Button",
-            "parent_automation_id": "FormOBDFunction",
-            "action": "invoke",
-            "fallback_window_handle": payload.fallback_window_handle,
-        },
-        timeout=30,
-    )
+    return invoke_native_rtd_popup_action(payload)
 
 
 @app.post("/bridge/admin/automation/rtd/select-location")
@@ -745,39 +1048,33 @@ def bridge_rtd_select_location(
     payload: RtdLocationRequest,
     _: dict = Depends(require_admin_session),
 ):
-    return agent_request(
-        "POST",
-        f"/agent/trace/windows/{payload.window_handle}/control-action",
-        {
-            "text": payload.location_text.strip(),
-            "control_type": "ListItem",
-            "parent_automation_id": "listBoxLocations",
-            "action": "select",
-            "fallback_window_handle": payload.fallback_window_handle,
-        },
-        timeout=30,
-    )
+    return select_native_rtd_location(payload)
 
 
 @app.post("/bridge/generic-obd/start")
 def bridge_generic_obd(_: dict = Depends(require_admin_session)):
+    require_no_blocking_native_popup("generic_obd_start")
     return agent_request("POST", "/agent/generic-obd/start")
 
 @app.post("/bridge/hardware/search-vci")
 def bridge_hardware_search_vci(_: dict = Depends(require_admin_session)):
+    require_no_blocking_native_popup("hardware_search_vci")
     return agent_request("POST", "/agent/hardware/search-vci")
 
 @app.post("/bridge/hardware/test-vci")
 def bridge_hardware_test_vci(_: dict = Depends(require_admin_session)):
+    require_no_blocking_native_popup("hardware_test_vci")
     return agent_request("POST", "/agent/hardware/test-vci")
 
 @app.post("/bridge/ui/click-text")
 def bridge_click_text(payload: ClickTextRequest, _: dict = Depends(require_admin_session)):
+    require_no_blocking_native_popup("click_text")
     return agent_request("POST", "/agent/ui/click-text", payload.model_dump())
 
 
 @app.post("/bridge/ui/click-point")
 def bridge_click_point(payload: ClickPointRequest, _: dict = Depends(require_admin_session)):
+    require_no_blocking_native_popup("click_point")
     return agent_request("POST", "/agent/ui/click-point", payload.model_dump())
 
 
@@ -870,6 +1167,7 @@ def vehicle_selection_post(payload: VehicleSelectionRequest, _: bool = Depends(r
 
 @app.post("/bridge/mobile/vehicles/activate")
 def mobile_activate_vehicle_context(payload: VehicleContextRequest, client: dict = Depends(require_paired_client)):
+    require_no_blocking_native_popup("activate_vehicle_context")
     vehicle_definition_id = require_vehicle_definition_id(payload.vehicle_definition_id)
     sent = safe_call(signalr_client.send, "carSelectionChanged", vehicle_definition_id)
     diagnostic_log.info(
@@ -877,14 +1175,223 @@ def mobile_activate_vehicle_context(payload: VehicleContextRequest, client: dict
         client["client_id"],
         vehicle_definition_id,
     )
+    record_activity_safely(
+        level="success",
+        source="mobile-portal",
+        action="activate_vehicle_context",
+        client=client["client_id"],
+        request={"vehicle_definition_id": vehicle_definition_id},
+    )
     return {
         "active_vehicle_definition_id": vehicle_definition_id,
         "sent": sent,
     }
 
 
+@app.get("/bridge/mobile/vin/isavailable")
+def mobile_vin_available(_: dict = Depends(require_paired_client)):
+    return diagnostic_engine_call(rest_client.get_vin_available)
+
+
+@app.get("/bridge/mobile/vin/history")
+def mobile_vin_history(_: dict = Depends(require_paired_client)):
+    return diagnostic_engine_call(rest_client.get_vin_history)
+
+
+@app.post("/bridge/mobile/vin/select")
+def mobile_select_vin(payload: VinSelectionRequest, client: dict = Depends(require_paired_client)):
+    require_no_blocking_native_popup("select_vehicle_by_vin")
+    formatted_vin = normalize_vin(payload.vin)
+    sent = safe_call(signalr_client.send, "setVin", formatted_vin)
+    record_activity_safely(
+        level="success",
+        source="mobile-portal",
+        action="select_vehicle_by_vin",
+        client=client["client_id"],
+        request={"vin_length": len("".join(formatted_vin.split()))},
+    )
+    return {"vin": formatted_vin, "sent": sent}
+
+
+@app.post("/bridge/mobile/vin/read")
+def mobile_read_vin(client: dict = Depends(require_paired_client)):
+    require_no_blocking_native_popup("read_vin_from_vehicle")
+    sent = safe_call(signalr_client.send, "runVinCheck")
+    record_activity_safely(
+        level="success",
+        source="mobile-portal",
+        action="read_vin_from_vehicle",
+        client=client["client_id"],
+    )
+    return sent
+
+
+@app.post("/bridge/mobile/vehicles/rtd/open")
+def mobile_open_vehicle_rtd(payload: RtdFunctionOpenRequest, client: dict = Depends(require_paired_client)):
+    request_log = payload.model_dump()
+    try:
+        vehicle_definition_id = require_vehicle_definition_id(payload.vehicle_definition_id)
+        selected_function = require_rtd_function(vehicle_definition_id, payload.rtd_index, payload.protocol)
+        source_window_handle = find_engine_window_handle()
+        existing_popup = active_native_blocking_popup()
+        if existing_popup.get("popup_open"):
+            selection_sent = None
+            popup_result = native_popup_contract(existing_popup, sent=None, command_sent=False)
+            popup_result["already_open"] = True
+            popup_result["warning"] = (
+                "A native popup is already blocking the desktop. "
+                "The requested RTD item was not launched; handle the current popup first."
+            )
+        else:
+            selection_sent = safe_call(signalr_client.send, "carSelectionChanged", vehicle_definition_id)
+            popup_result = open_native_rtd_popup(source_window_handle, payload.rtd_index, payload.timeout_seconds)
+        result = {
+            "active_vehicle_definition_id": vehicle_definition_id,
+            "rtd_function": selected_function,
+            "selection_sent": selection_sent,
+            "source_window_handle": source_window_handle,
+            **popup_result,
+        }
+    except HTTPException as exc:
+        system_message = (
+            "RTD popup workflow failed after the RTD row was selected. "
+            "The submitted payload, returned error and downstream Desktop Agent diagnostics are retained."
+        )
+        record_activity_safely(
+            level="error",
+            source="mobile-portal",
+            action="open_rtd_native_popup_failed",
+            client=client["client_id"],
+            method="POST",
+            path="/bridge/mobile/vehicles/rtd/open",
+            status_code=exc.status_code,
+            request=request_log,
+            response={"detail": exc.detail},
+            error=system_message,
+            system_log={"logger": "bridge-diagnostics.log", "message": system_message},
+        )
+        raise
+
+    unconfirmed = not bool(result.get("confirmed"))
+    reused = bool(result.get("already_open"))
+    log_level = "warning" if unconfirmed or reused else "success"
+    log_action = "open_rtd_native_popup_warning" if log_level == "warning" else "open_rtd_native_popup"
+    response_log = {
+        "confirmed": result.get("confirmed"),
+        "run_button_confirmed": result.get("run_button_confirmed"),
+        "warning": result.get("warning"),
+        "detection_method": result.get("detection_method"),
+        "available_actions": result.get("available_actions"),
+        "location_count": len(result.get("locations", [])),
+        "popup_signature": (result.get("popup_identity") or {}).get("signature"),
+        "popup_window_handle": result.get("popup_window_handle"),
+    }
+    if unconfirmed:
+        screen = result.get("screen") if isinstance(result.get("screen"), dict) else {}
+        response_log["window_transition"] = screen.get("window_transition")
+        response_log["observed_windows"] = screen.get("observed_windows")
+        diagnostic_log.warning(
+            "RTD popup detected without stable action controls client_id=%s request=%s response=%s",
+            client["client_id"],
+            request_log,
+            response_log,
+        )
+    record_activity_safely(
+        level=log_level,
+        source="mobile-portal",
+        action=log_action,
+        client=client["client_id"],
+        method="POST",
+        path="/bridge/mobile/vehicles/rtd/open",
+        status_code=200,
+        request=request_log,
+        response=response_log,
+        system_log={
+            "logger": "bridge-diagnostics.log",
+            "message": result.get("warning") or "Native RTD popup control signature confirmed.",
+        },
+    )
+    return result
+
+
+@app.get("/bridge/mobile/automation/blocking-popup")
+def mobile_blocking_popup_state(_: dict = Depends(require_paired_client)):
+    return native_popup_contract(active_native_blocking_popup(), command_sent=False)
+
+
+@app.post("/bridge/mobile/automation/rtd/popup-action")
+def mobile_rtd_popup_action(
+    payload: RtdPopupActionRequest,
+    client: dict = Depends(require_paired_client),
+):
+    request_log = payload.model_dump()
+    try:
+        result = invoke_native_rtd_popup_action(payload)
+    except HTTPException as exc:
+        system_message = "Native RTD popup action failed; request and Desktop Agent response are retained."
+        record_activity_safely(
+            level="error",
+            source="mobile-portal",
+            action="rtd_popup_action_failed",
+            client=client["client_id"],
+            method="POST",
+            path="/bridge/mobile/automation/rtd/popup-action",
+            status_code=exc.status_code,
+            request=request_log,
+            response={"detail": exc.detail},
+            error=system_message,
+            system_log={"logger": "bridge-diagnostics.log", "message": system_message},
+        )
+        raise
+    record_activity_safely(
+        level="success",
+        source="mobile-portal",
+        action="rtd_popup_action",
+        client=client["client_id"],
+        request=request_log,
+        response=result,
+    )
+    return result
+
+
+@app.post("/bridge/mobile/automation/rtd/select-location")
+def mobile_rtd_select_location(
+    payload: RtdLocationRequest,
+    client: dict = Depends(require_paired_client),
+):
+    request_log = payload.model_dump()
+    try:
+        result = select_native_rtd_location(payload)
+    except HTTPException as exc:
+        system_message = "Native RTD location selection failed; request and Desktop Agent response are retained."
+        record_activity_safely(
+            level="error",
+            source="mobile-portal",
+            action="rtd_popup_location_failed",
+            client=client["client_id"],
+            method="POST",
+            path="/bridge/mobile/automation/rtd/select-location",
+            status_code=exc.status_code,
+            request=request_log,
+            response={"detail": exc.detail},
+            error=system_message,
+            system_log={"logger": "bridge-diagnostics.log", "message": system_message},
+        )
+        raise
+    record_activity_safely(
+        level="success",
+        source="mobile-portal",
+        action="rtd_popup_location_selected",
+        client=client["client_id"],
+        request=request_log,
+        response=result,
+    )
+    return result
+
+
 @app.post("/bridge/admin/vehicles/activate")
 def admin_activate_vehicle_context(payload: VehicleContextRequest, _: dict = Depends(require_admin_session)):
+    require_no_blocking_native_popup("admin_activate_vehicle_context")
     vehicle_definition_id = require_vehicle_definition_id(payload.vehicle_definition_id)
     sent = safe_call(signalr_client.send, "carSelectionChanged", vehicle_definition_id)
     return {
@@ -896,45 +1403,32 @@ def admin_activate_vehicle_context(payload: VehicleContextRequest, _: dict = Dep
 @app.post("/bridge/admin/vehicles/rtd/open")
 def admin_open_vehicle_rtd(payload: RtdFunctionOpenRequest, _: dict = Depends(require_admin_session)):
     vehicle_definition_id = require_vehicle_definition_id(payload.vehicle_definition_id)
-    selection_sent = safe_call(signalr_client.send, "carSelectionChanged", vehicle_definition_id)
-    functions = diagnostic_engine_call(rest_client.get_rtd_functions, vehicle_definition_id, payload.protocol)
-
-    if not isinstance(functions, list):
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "RTD_FUNCTION_LIST_UNAVAILABLE",
-                "message": "Diagnostic Engine Console did not return an RTD function list for the active vehicle context.",
-            },
+    selected_function = require_rtd_function(vehicle_definition_id, payload.rtd_index, payload.protocol)
+    source_window_handle = find_engine_window_handle()
+    existing_popup = active_native_blocking_popup()
+    if existing_popup.get("popup_open"):
+        selection_sent = None
+        popup_result = native_popup_contract(existing_popup, sent=None, command_sent=False)
+        popup_result["already_open"] = True
+        popup_result["warning"] = (
+            "A native popup is already blocking the desktop. "
+            "The requested RTD item was not launched; handle the current popup first."
         )
-
-    selected_function = next(
-        (
-            item for item in functions
-            if isinstance(item, dict) and str(item.get("index")) == str(payload.rtd_index)
-        ),
-        None,
-    )
-    if selected_function is None:
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "code": "RTD_FUNCTION_NOT_FOUND",
-                "message": "The selected RTD function does not belong to the active vehicle context.",
-            },
-        )
-
-    popup_sent = safe_call(signalr_client.send, "viewRTDHelpDocument", payload.rtd_index)
+    else:
+        selection_sent = safe_call(signalr_client.send, "carSelectionChanged", vehicle_definition_id)
+        popup_result = open_native_rtd_popup(source_window_handle, payload.rtd_index, payload.timeout_seconds)
     return {
         "active_vehicle_definition_id": vehicle_definition_id,
         "rtd_function": selected_function,
         "selection_sent": selection_sent,
-        "popup_sent": popup_sent,
+        "source_window_handle": source_window_handle,
+        **popup_result,
     }
 
 
 @app.post("/bridge/admin/vin/select")
 def admin_select_vin(payload: VinSelectionRequest, _: dict = Depends(require_admin_session)):
+    require_no_blocking_native_popup("admin_select_vehicle_by_vin")
     formatted_vin = normalize_vin(payload.vin)
     sent = safe_call(signalr_client.send, "setVin", formatted_vin)
     return {
@@ -945,6 +1439,7 @@ def admin_select_vin(payload: VinSelectionRequest, _: dict = Depends(require_adm
 
 @app.post("/bridge/admin/vin/read")
 def admin_read_vin(_: dict = Depends(require_admin_session)):
+    require_no_blocking_native_popup("admin_read_vin_from_vehicle")
     return safe_call(signalr_client.send, "runVinCheck")
 
 
@@ -970,11 +1465,13 @@ def signalr_status(_: dict = Depends(require_admin_session)):
 
 @app.post("/bridge/signalr/send")
 def signalr_send(payload: SignalRSendRequest, _: dict = Depends(require_admin_session)):
+    require_no_blocking_native_popup("signalr_send")
     return safe_call(signalr_client.send, payload.event, payload.data)
 
 
 @app.post("/bridge/diagnostics/run")
 def run_diagnosis(payload: RunDiagnosisRequest, _: dict = Depends(require_admin_session)):
+    require_no_blocking_native_popup("run_diagnosis")
     return safe_call(
         signalr_client.send_run_diagnosis,
         payload.function_name,
@@ -1125,6 +1622,7 @@ def bridge_save_engine_profile(
 
 @app.post("/bridge/admin/engine-profiles/{module}/launch")
 def bridge_launch_engine(module: str, _: dict = Depends(require_admin_session)):
+    require_no_blocking_native_popup("launch_engine")
     profile = next(
         (profile for profile in list_engine_profiles() if profile["module"] == module),
         None,

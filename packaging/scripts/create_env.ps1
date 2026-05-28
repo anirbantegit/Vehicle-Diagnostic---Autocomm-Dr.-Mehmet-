@@ -90,13 +90,15 @@ try {
     $AppEnvironment = Get-EnvValueFromFile -Path $EnvPath -Name "APP_ENV" -Default "development"
     $BridgeHost = Get-EnvValueFromFile -Path $EnvPath -Name "BRIDGE_HOST" -Default "0.0.0.0"
     $BridgePort = Get-EnvValueFromFile -Path $EnvPath -Name "BRIDGE_PORT" -Default "8090"
+    $BridgePublicScheme = Get-EnvValueFromFile -Path $EnvPath -Name "BRIDGE_PUBLIC_SCHEME" -Default "http"
+    $BridgePublicHost = Get-EnvValueFromFile -Path $EnvPath -Name "BRIDGE_PUBLIC_HOST" -Default $BridgeHost
     $AgentHost = Get-EnvValueFromFile -Path $EnvPath -Name "AGENT_HOST" -Default "127.0.0.1"
     $AgentPort = Get-EnvValueFromFile -Path $EnvPath -Name "AGENT_PORT" -Default "8091"
     $EngineHost = Get-EnvValueFromFile -Path $EnvPath -Name "AUTOCOM_HOST" -Default "localhost"
     $EngineHttpPort = Get-EnvValueFromFile -Path $EnvPath -Name "AUTOCOM_HTTP_PORT" -Default "9000"
     $EngineSignalrPort = Get-EnvValueFromFile -Path $EnvPath -Name "AUTOCOM_SIGNALR_PORT" -Default "9001"
 
-    Write-ConfigLog "INFO" "Resolved settings APP_ENV=$AppEnvironment DATA_DIR=$DataDir BRIDGE=http://${BridgeHost}:$BridgePort AGENT=http://${AgentHost}:$AgentPort ENGINE_API=http://${EngineHost}:$EngineHttpPort/api ENGINE_SIGNALR=http://${EngineHost}:$EngineSignalrPort/signalr"
+    Write-ConfigLog "INFO" "Resolved settings APP_ENV=$AppEnvironment DATA_DIR=$DataDir BRIDGE_BIND=${BridgeHost}:$BridgePort BRIDGE_PUBLIC=${BridgePublicScheme}://${BridgePublicHost}:$BridgePort AGENT=http://${AgentHost}:$AgentPort ENGINE_API=http://${EngineHost}:$EngineHttpPort/api ENGINE_SIGNALR=http://${EngineHost}:$EngineSignalrPort/signalr"
     if ($AppEnvironment -ne "production") {
         Write-ConfigLog "WARN" "The selected installer environment is not production: APP_ENV=$AppEnvironment source=$SelectedSourceName"
     }

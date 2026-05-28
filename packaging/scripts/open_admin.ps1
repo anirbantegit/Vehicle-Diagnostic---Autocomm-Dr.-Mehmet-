@@ -25,8 +25,9 @@ $DataDir = [Environment]::ExpandEnvironmentVariables($DataDir)
 $LogDir = Join-Path $DataDir "logs"
 $OpenAdminLog = Join-Path $LogDir "open-admin.log"
 $BridgePort = Get-EnvValue "BRIDGE_PORT" "8090"
-$AdminUri = "http://localhost:$BridgePort/admin"
-$IdentityUri = "http://127.0.0.1:$BridgePort/bridge/public/identity"
+$BridgePublicScheme = Get-EnvValue "BRIDGE_PUBLIC_SCHEME" "http"
+$AdminUri = "${BridgePublicScheme}://localhost:$BridgePort/admin"
+$IdentityUri = "${BridgePublicScheme}://localhost:$BridgePort/bridge/public/identity"
 
 New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
 

@@ -103,6 +103,9 @@ class Settings:
     bridge_host: str = env_str("BRIDGE_HOST", "0.0.0.0")
     bridge_port: int = env_int("BRIDGE_PORT", 8090)
     bridge_public_host: str = env_str("BRIDGE_PUBLIC_HOST", "")
+    bridge_public_scheme: str = env_str("BRIDGE_PUBLIC_SCHEME", "http").strip().lower()
+    bridge_tls_cert_file: str = env_str("BRIDGE_TLS_CERT_FILE", "").strip()
+    bridge_tls_key_file: str = env_str("BRIDGE_TLS_KEY_FILE", "").strip()
 
     agent_host: str = env_str("AGENT_HOST", "127.0.0.1")
     agent_port: int = env_int("AGENT_PORT", 8091)
@@ -128,6 +131,18 @@ class Settings:
 
     generic_obd_click_x: int = env_int("GENERIC_OBD_CLICK_X", 52)
     generic_obd_click_y: int = env_int("GENERIC_OBD_CLICK_Y", 280)
+
+    @property
+    def bridge_tls_cert_path(self) -> Path | None:
+        return Path(self.bridge_tls_cert_file).expanduser() if self.bridge_tls_cert_file else None
+
+    @property
+    def bridge_tls_key_path(self) -> Path | None:
+        return Path(self.bridge_tls_key_file).expanduser() if self.bridge_tls_key_file else None
+
+    @property
+    def bridge_tls_enabled(self) -> bool:
+        return self.bridge_public_scheme == "https"
 
     @property
     def storage_dir(self) -> Path:
@@ -221,6 +236,23 @@ class Settings:
 settings = Settings()
 
 def validate_runtime_settings() -> None:
+    if settings.bridge_public_scheme not in {"http", "https"}:
+        raise RuntimeError("BRIDGE_PUBLIC_SCHEME must be either http or https.")
+
+    if settings.bridge_tls_enabled:
+        if not settings.bridge_tls_cert_path or not settings.bridge_tls_key_path:
+            raise RuntimeError(
+                "HTTPS mobile camera mode requires BRIDGE_TLS_CERT_FILE and BRIDGE_TLS_KEY_FILE."
+            )
+        if not settings.bridge_tls_cert_path.exists() or not settings.bridge_tls_key_path.exists():
+            raise RuntimeError(
+                "HTTPS certificate/key files do not exist. Provide valid trusted TLS paths before enabling HTTPS."
+            )
+    elif settings.bridge_tls_cert_path or settings.bridge_tls_key_path:
+        raise RuntimeError(
+            "BRIDGE_TLS_CERT_FILE/BRIDGE_TLS_KEY_FILE were provided but BRIDGE_PUBLIC_SCHEME is not https."
+        )
+
     if settings.app_env == "production":
         if settings.agent_host not in {"127.0.0.1", "localhost", "::1"}:
             raise RuntimeError(

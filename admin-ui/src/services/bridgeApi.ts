@@ -66,10 +66,10 @@ export const bridgeApi = createApi({
         getPairingStatus: builder.query<PairingStatusResponse, string>({
             query: (pairingId) => ({path: `/bridge/pairing/${encodeURIComponent(pairingId)}/status`}),
         }),
-        revokeClient: builder.mutation<unknown, string>({
+        disconnectClient: builder.mutation<unknown, string>({
             query: (clientId) => ({
-                path: `/bridge/clients/${encodeURIComponent(clientId)}/revoke`,
-                method: 'POST',
+                path: `/bridge/clients/${encodeURIComponent(clientId)}`,
+                method: 'DELETE',
             }),
             invalidatesTags: ['Clients', 'Health'],
         }),
@@ -136,7 +136,7 @@ export const {
     useGetClientsQuery,
     useStartPairingMutation,
     useGetPairingStatusQuery,
-    useRevokeClientMutation,
+    useDisconnectClientMutation,
     useLazyGetTraceWindowsQuery,
     useLazyGetTraceWindowScreenQuery,
     useClickTraceWindowPointMutation,

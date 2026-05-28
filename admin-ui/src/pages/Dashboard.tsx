@@ -1,12 +1,13 @@
-import React, {useEffect, useState} from 'react';
-import {QRCodeCanvas} from 'qrcode.react';
+import React, {useCallback, useEffect, useRef, useState} from 'react';
+import {QRCodeSVG} from 'qrcode.react';
+import {PairingExpiryProgress} from '../components/pairing/PairingExpiryProgress';
 import {HealthState, PairingStartResponse, PairingStatus} from '../api/bridgeClient';
 import {
     useGetClientsQuery,
     useGetHealthQuery,
     useGetPairingStatusQuery,
     useGetPublicIdentityQuery,
-    useRevokeClientMutation,
+    useDisconnectClientMutation,
     useStartPairingMutation,
 } from '../services/bridgeApi';
 
@@ -166,6 +167,10 @@ function OnboardingStep({
     );
 }
 
+const createCompactScannerQrValue = (pairing: PairingStartResponse): string => (
+    `autocom-pair|${encodeURIComponent(pairing.pairing_id)}|${encodeURIComponent(pairing.qr_payload.pairing_secret)}`
+);
+
 function formatDate(value: string | null | undefined): string {
     if (!value) {
         return '-';
@@ -196,10 +201,12 @@ export default function Dashboard() {
         refetch: refetchClients,
     } = useGetClientsQuery();
     const [startPairingRequest, {isLoading: isStartingPairing}] = useStartPairingMutation();
-    const [revokeClientRequest, {isLoading: isRevokingClient}] = useRevokeClientMutation();
+    const [disconnectClientRequest, {isLoading: isDisconnectingClient}] = useDisconnectClientMutation();
     const [pairing, setPairing] = useState<PairingStartResponse | null>(null);
     const [pairingStatus, setPairingStatus] = useState<PairingStatus | 'idle'>('idle');
     const [actionError, setActionError] = useState<string>('');
+    const [isAutoRefreshingPairing, setIsAutoRefreshingPairing] = useState(false);
+    const pairingRequestInFlightRef = useRef(false);
 
     const clients = clientsResponse?.clients ?? [];
     const {data: latestPairingStatus, error: pairingStatusError} = useGetPairingStatusQuery(
@@ -228,8 +235,13 @@ export default function Dashboard() {
         }
     }
 
-    async function handleStartPairing(): Promise<void> {
+    const issuePairingQr = useCallback(async (automaticRefresh: boolean): Promise<void> => {
+        if (pairingRequestInFlightRef.current) {
+            return;
+        }
+        pairingRequestInFlightRef.current = true;
         setActionError('');
+        setIsAutoRefreshingPairing(automaticRefresh);
 
         try {
             const result = await startPairingRequest().unwrap();
@@ -237,14 +249,29 @@ export default function Dashboard() {
             setPairingStatus('pending');
         } catch (exc) {
             setActionError(exc instanceof Error ? exc.message : String(exc));
+        } finally {
+            pairingRequestInFlightRef.current = false;
+            setIsAutoRefreshingPairing(false);
         }
-    }
+    }, [startPairingRequest]);
 
-    async function handleRevoke(clientId: string): Promise<void> {
+    const handleStartPairing = (): void => {
+        void issuePairingQr(false);
+    };
+
+    const handlePairingExpired = useCallback((): void => {
+        if (pairingStatus === 'claimed') {
+            return;
+        }
+        setPairingStatus('expired');
+        void issuePairingQr(true);
+    }, [issuePairingQr, pairingStatus]);
+
+    async function handleDisconnect(clientId: string): Promise<void> {
         setActionError('');
 
         try {
-            await revokeClientRequest(clientId).unwrap();
+            await disconnectClientRequest(clientId).unwrap();
             await Promise.all([refetchHealth(), refetchClients()]);
         } catch (exc) {
             setActionError(exc instanceof Error ? exc.message : String(exc));
@@ -260,14 +287,17 @@ export default function Dashboard() {
         if (latestPairingStatus.status === 'claimed') {
             void Promise.all([refetchHealth(), refetchClients()]);
         }
-    }, [latestPairingStatus, refetchClients, refetchHealth]);
+        if (latestPairingStatus.status === 'expired') {
+            void issuePairingQr(true);
+        }
+    }, [issuePairingQr, latestPairingStatus, refetchClients, refetchHealth]);
 
     const busy = isHealthFetching || isIdentityFetching || isClientsFetching
         ? 'health'
         : isStartingPairing
             ? 'pairing'
-            : isRevokingClient
-                ? 'revoke'
+            : isDisconnectingClient
+                ? 'disconnect'
                 : '';
     const error = actionError
         || queryErrorMessage(healthError)
@@ -287,9 +317,14 @@ export default function Dashboard() {
                 : 'attention';
     const engineReady = connectionState === 'healthy';
     const activeClients = clients.filter((client) => !client.revoked);
-    const qrText = pairing ? pairing.pairing_url : '';
+    const qrText = pairing ? createCompactScannerQrValue(pairing) : '';
     const pairingUsesLoopback = Boolean(
         pairing && /\/\/(localhost|127\.0\.0\.1|\[::1\])(?::|\/)/i.test(pairing.pairing_url),
+    );
+    const mobilePortalUrl = identity?.base_url ? `${identity.base_url}/mobile` : '';
+    const mobilePortalSupportsLiveCamera = Boolean(identity?.base_url?.toLowerCase().startsWith('https://'));
+    const mobilePortalUsesLoopback = Boolean(
+        mobilePortalUrl && /\/\/(localhost|127\.0\.0\.1|\[::1\])(?::|\/)/i.test(mobilePortalUrl),
     );
 
 
@@ -413,6 +448,26 @@ export default function Dashboard() {
                         {identity?.base_url && (
                             <div style={{...muted, marginTop: 5}}>{identity.base_url}</div>
                         )}
+                        {mobilePortalUrl && (
+                            <>
+                                <div style={{...muted, fontSize: 12, marginTop: 12}}>
+                                    Mobile Portal address for phone
+                                </div>
+                                <div style={{...muted, marginTop: 5, wordBreak: 'break-all'}}>
+                                    {mobilePortalUrl}
+                                </div>
+                                {mobilePortalUsesLoopback && (
+                                    <div style={{...muted, color: '#991b1b', marginTop: 8}}>
+                                        This address is not reachable from a phone. Set <strong>BRIDGE_PUBLIC_HOST</strong> to this PC&apos;s LAN IP.
+                                    </div>
+                                )}
+                                {!mobilePortalSupportsLiveCamera && !mobilePortalUsesLoopback && (
+                                    <div style={{...muted, color: '#92400e', marginTop: 8}}>
+                                        Live QR camera scanning needs <strong>HTTPS</strong>. Configure a trusted certificate for the PC host to enable the in-camera detection frame on phones.
+                                    </div>
+                                )}
+                            </>
+                        )}
                     </div>
 
                     <button
@@ -431,9 +486,11 @@ export default function Dashboard() {
                     {pairing && (
                         <>
                             <p style={{...muted, margin: '14px 0 0'}}>
-                                Pairing status: <strong>{pairingStatus}</strong>
+                                Pairing status: <strong>{isAutoRefreshingPairing ? 'refreshing' : pairingStatus}</strong>
                                 <br/>
                                 QR expires at: <strong>{formatDate(pairing.expires_at)}</strong>
+                                <br/>
+                                Expired QR codes are regenerated automatically while waiting for a phone.
                             </p>
                             {pairingUsesLoopback && (
                                 <p style={{...muted, color: '#991b1b', marginTop: 10}}>
@@ -458,22 +515,36 @@ export default function Dashboard() {
                                     border: '1px solid #e2e8f0',
                                 }}
                             >
-                                <QRCodeCanvas value={qrText} size={235} marginSize={8}/>
+                                <QRCodeSVG value={qrText} level="M" marginSize={5} size={340} title="Scan to pair this mobile device"/>
                             </div>
                             <div style={{marginTop: 12}}>
                                 <StatusBadge
-                                    state={pairingStatus === 'claimed' ? 'healthy' : pairingStatus === 'expired' ? 'blocked' : 'attention'}
+                                    state={pairingStatus === 'claimed' ? 'healthy' : pairingStatus === 'expired' && !isAutoRefreshingPairing ? 'blocked' : 'attention'}
                                     label={
                                         pairingStatus === 'claimed'
                                             ? 'Device Connected'
-                                            : pairingStatus === 'expired'
-                                                ? 'QR Expired'
-                                                : 'Waiting for Scan'
+                                            : isAutoRefreshingPairing
+                                                ? 'Refreshing QR'
+                                                : pairingStatus === 'expired'
+                                                    ? 'QR Expired'
+                                                    : 'Waiting for Scan'
                                     }
                                 />
                             </div>
-                            <p style={{...muted, margin: '12px 0 0', wordBreak: 'break-all'}}>
-                                Opens: {pairing.pairing_url}
+                            {pairingStatus !== 'claimed' && (
+                                <PairingExpiryProgress
+                                    active={pairingStatus === 'pending'}
+                                    expiresAt={pairing.expires_at}
+                                    expiresInSeconds={pairing.expires_in}
+                                    refreshing={isAutoRefreshingPairing}
+                                    onExpired={handlePairingExpired}
+                                />
+                            )}
+                            <p style={{...muted, margin: '12px 0 0'}}>
+                                This QR is optimized for the in-app live scanner and is intentionally shorter for reliable camera detection.
+                            </p>
+                            <p style={{...muted, margin: '8px 0 0', wordBreak: 'break-all'}}>
+                                Direct mobile link: {pairing.pairing_url}
                             </p>
                         </>
                     ) : (
@@ -561,9 +632,9 @@ export default function Dashboard() {
                                         type="button"
                                         style={dangerButton}
                                         disabled={client.revoked || Boolean(busy)}
-                                        onClick={() => handleRevoke(client.client_id)}
+                                        onClick={() => handleDisconnect(client.client_id)}
                                     >
-                                        Remove Access
+                                        Disconnect
                                     </button>
                                 </td>
                             </tr>

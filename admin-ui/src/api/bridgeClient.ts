@@ -216,7 +216,7 @@ export type RtdOpenResponse = {
 export type ActionLogEntry = {
     id: string;
     timestamp: string;
-    level: 'info' | 'success' | 'error' | 'event';
+    level: 'info' | 'success' | 'warning' | 'error' | 'event';
     source: string;
     action: string;
     method?: string;
@@ -224,7 +224,14 @@ export type ActionLogEntry = {
     request?: unknown;
     response?: unknown;
     error?: string;
+    system_log?: unknown;
     duration_ms?: number;
+    status_code?: number;
+    client?: string;
+};
+
+export type ServerActionLogsResponse = {
+    logs: ActionLogEntry[];
 };
 
 const MAX_ACTION_LOGS = 300;
@@ -500,8 +507,8 @@ export function subscribeActionLogs(listener: (logs: ActionLogEntry[]) => void):
     return () => actionLogListeners.delete(listener);
 }
 
-export function downloadActionLogs(): void {
-    const blob = new Blob([JSON.stringify(redactSensitiveValue(getActionLogs()), null, 2)], {
+export function downloadActionLogs(logs: ActionLogEntry[] = getActionLogs()): void {
+    const blob = new Blob([JSON.stringify(redactSensitiveValue(logs), null, 2)], {
         type: 'application/json',
     });
     const url = URL.createObjectURL(blob);
@@ -510,6 +517,37 @@ export function downloadActionLogs(): void {
     link.download = `diagnostic-bridge-debug-log-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
     link.click();
     URL.revokeObjectURL(url);
+}
+
+export async function getServerActionLogs(): Promise<ActionLogEntry[]> {
+    const response = await fetch('/bridge/admin/super-logs', {
+        credentials: 'same-origin',
+        headers: buildHeaders(undefined, true),
+    });
+    const data = (await response.json()) as ServerActionLogsResponse | {detail?: unknown};
+    if (!response.ok) {
+        throw new Error(parseErrorMessage(data, response.status));
+    }
+    const logs = (data as ServerActionLogsResponse).logs;
+    return Array.isArray(logs) ? redactSensitiveValue(logs) as ActionLogEntry[] : [];
+}
+
+export async function clearServerActionLogs(): Promise<void> {
+    const response = await fetch('/bridge/admin/super-logs', {
+        method: 'DELETE',
+        credentials: 'same-origin',
+        headers: buildHeaders(undefined, true),
+    });
+    if (!response.ok) {
+        const text = await response.text();
+        let data: unknown = text;
+        try {
+            data = text ? JSON.parse(text) : null;
+        } catch {
+            // Keep plain response text for diagnostics.
+        }
+        throw new Error(parseErrorMessage(data, response.status));
+    }
 }
 
 
@@ -1081,9 +1119,9 @@ export function getClients(): Promise<ClientsResponse> {
     return bridgeRequest<ClientsResponse>('/bridge/clients');
 }
 
-export function revokeClient(clientId: string): Promise<unknown> {
-    return bridgeRequest<unknown>(`/bridge/clients/${clientId}/revoke`, {
-        method: 'POST',
+export function disconnectClient(clientId: string): Promise<unknown> {
+    return bridgeRequest<unknown>(`/bridge/clients/${encodeURIComponent(clientId)}`, {
+        method: 'DELETE',
     });
 }
 

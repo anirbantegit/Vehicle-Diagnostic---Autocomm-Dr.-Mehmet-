@@ -16,3 +16,4 @@ __pycache__/
 /storage/
 
 /app/web_admin/dist/
+app/web_mobile/dist/

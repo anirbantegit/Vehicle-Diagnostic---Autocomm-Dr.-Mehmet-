@@ -1,0 +1,128 @@
+@import "tailwindcss";
+
+:root {
+    --mobile-page-bg: #020617;
+    --mobile-shell-bg: radial-gradient(circle at top, #12334b 0%, #020617 50%);
+    --mobile-card-bg: rgba(15, 23, 42, 0.85);
+    --mobile-card-border: rgba(255, 255, 255, 0.10);
+    --mobile-text: #f1f5f9;
+    --mobile-muted: #94a3b8;
+    --mobile-empty-bg: #f8fafc;
+    --mobile-empty-border: #e2e8f0;
+    --mobile-empty-text: #64748b;
+    color-scheme: dark;
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+:root[data-theme="light"] {
+    --mobile-page-bg: #f5f7fb;
+    --mobile-shell-bg: radial-gradient(circle at top, #d9f4ff 0%, #f5f7fb 54%);
+    --mobile-card-bg: rgba(255, 255, 255, 0.95);
+    --mobile-card-border: #e2e8f0;
+    --mobile-text: #0f172a;
+    --mobile-muted: #475569;
+    --mobile-empty-bg: #f8fafc;
+    --mobile-empty-border: #cbd5e1;
+    --mobile-empty-text: #475569;
+    color-scheme: light;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    min-width: 320px;
+    background: var(--mobile-page-bg);
+}
+
+.mobile-shell {
+    background: var(--mobile-shell-bg);
+}
+
+.mobile-dark-card {
+    background: var(--mobile-card-bg);
+    border-color: var(--mobile-card-border);
+}
+
+.mobile-portal {
+    background: var(--mobile-page-bg);
+    color: var(--mobile-text);
+}
+
+.mobile-empty-state {
+    border-color: var(--mobile-empty-border);
+    background: var(--mobile-empty-bg);
+    color: var(--mobile-empty-text);
+}
+
+.mobile-empty-state--inverted {
+    background: rgba(15, 23, 42, 0.4);
+    border-color: rgba(148, 163, 184, 0.4);
+    color: var(--mobile-muted);
+}
+
+.mobile-theme-toggle {
+    border-color: var(--mobile-card-border);
+    color: var(--mobile-text);
+    background: rgba(148, 163, 184, 0.10);
+}
+
+.mobile-theme-toggle:hover {
+    background: rgba(34, 211, 238, 0.15);
+}
+
+:root[data-theme="light"] .mobile-shell,
+:root[data-theme="light"] .mobile-dark-card {
+    color: #0f172a;
+}
+
+:root[data-theme="light"] .mobile-dark-card .text-white,
+:root[data-theme="light"] .mobile-dark-card .text-slate-100 {
+    color: #0f172a;
+}
+
+:root[data-theme="light"] .mobile-dark-card .text-slate-400,
+:root[data-theme="light"] .mobile-dark-card .text-slate-500 {
+    color: #475569;
+}
+
+:root[data-theme="light"] .mobile-portal .bg-slate-950,
+:root[data-theme="light"] .mobile-portal .bg-slate-950\/85,
+:root[data-theme="light"] .mobile-portal .bg-slate-950\/60,
+:root[data-theme="light"] .mobile-portal .bg-slate-950\/55,
+:root[data-theme="light"] .mobile-portal .bg-slate-950\/35,
+:root[data-theme="light"] .mobile-portal .bg-slate-950\/30 {
+    background-color: #f8fafc;
+}
+
+:root[data-theme="light"] .mobile-portal .bg-slate-900\/70,
+:root[data-theme="light"] .mobile-portal .bg-slate-900\/65 {
+    background-color: #ffffff;
+}
+
+:root[data-theme="light"] .mobile-portal .border-white\/10,
+:root[data-theme="light"] .mobile-portal .border-white\/5,
+:root[data-theme="light"] .mobile-portal .border-slate-800,
+:root[data-theme="light"] .mobile-portal .border-slate-700 {
+    border-color: #e2e8f0;
+}
+
+:root[data-theme="light"] .mobile-portal .text-white,
+:root[data-theme="light"] .mobile-portal .text-slate-100,
+:root[data-theme="light"] .mobile-portal .text-slate-300 {
+    color: #0f172a;
+}
+
+:root[data-theme="light"] .mobile-portal .text-slate-400,
+:root[data-theme="light"] .mobile-portal .text-slate-500,
+:root[data-theme="light"] .mobile-portal .text-slate-600 {
+    color: #475569;
+}
+
+.qr-camera-overlay svg {
+    stroke: rgb(103 232 249) !important;
+    stroke-width: 4px !important;
+    fill: rgb(34 211 238 / 0.16) !important;
+}

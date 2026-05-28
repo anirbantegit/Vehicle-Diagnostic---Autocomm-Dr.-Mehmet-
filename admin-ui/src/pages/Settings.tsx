@@ -21,14 +21,6 @@ export default function Settings() {
 
             <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 18}}>
                 <section style={card}>
-                    <h3 style={{marginTop: 0}}>Local Console Security</h3>
-                    <p style={{color: '#64748b', fontSize: 13}}>
-                        Administrator authentication is generated and managed locally by the
-                        service. No credential entry or copying is required.
-                    </p>
-                </section>
-
-                <section style={card}>
                     <h3 style={{marginTop: 0}}>Runtime Commands</h3>
                     <p style={{color: '#64748b', fontSize: 13}}>
                         During development, run the Desktop Agent and Bridge Service separately.
@@ -65,17 +57,6 @@ Desktop Agent :8091
   ↓ pywinauto
 Detected Diagnostic Engine window`}
     </pre>
-                </section>
-
-                <section style={card}>
-                    <h3 style={{marginTop: 0}}>Next UI Targets</h3>
-                    <ul style={{color: '#334155', lineHeight: 1.8}}>
-                        <li>Live diagnostic event stream viewer</li>
-                        <li>Better screen text search/filter</li>
-                        <li>Clickable UI text list</li>
-                        <li>Logs page</li>
-                        <li>Installer shortcut opening /admin</li>
-                    </ul>
                 </section>
             </div>
         </div>

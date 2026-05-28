@@ -88,7 +88,8 @@ try {
     Invoke-NssmCommand -Arguments @("start", $ServiceName)
 
     $BridgePort = Get-EnvValue "BRIDGE_PORT" "8090"
-    $BridgeHealthUri = "http://127.0.0.1:$BridgePort/bridge/public/identity"
+    $BridgePublicScheme = Get-EnvValue "BRIDGE_PUBLIC_SCHEME" "http"
+    $BridgeHealthUri = "${BridgePublicScheme}://localhost:$BridgePort/bridge/public/identity"
     $Ready = $false
     $LastProbeFailure = "No health response received."
     for ($Attempt = 1; $Attempt -le 12; $Attempt++) {

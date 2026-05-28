@@ -1,5 +1,5 @@
 import React, {useEffect, useState} from 'react';
-import {getClients, PairedClient, revokeClient} from '../api/bridgeClient';
+import {disconnectClient, getClients, PairedClient} from '../api/bridgeClient';
 
 const card: React.CSSProperties = {
     background: '#fff',
@@ -19,7 +19,7 @@ const button: React.CSSProperties = {
     fontWeight: 700,
 };
 
-const revokeButton: React.CSSProperties = {
+const disconnectButton: React.CSSProperties = {
     ...button,
     background: '#dc2626',
 };
@@ -42,11 +42,11 @@ export default function Clients() {
         }
     }
 
-    async function handleRevoke(clientId: string) {
+    async function handleDisconnect(clientId: string) {
         setBusy(true);
         setError('');
         try {
-            await revokeClient(clientId);
+            await disconnectClient(clientId);
             await refresh();
         } catch (exc) {
             setError(exc instanceof Error ? exc.message : String(exc));
@@ -154,11 +154,11 @@ export default function Clients() {
                                 <td style={td}>
                                     <button
                                         type="button"
-                                        style={revokeButton}
+                                        style={disconnectButton}
                                         disabled={client.revoked || busy}
-                                        onClick={() => handleRevoke(client.client_id)}
+                                        onClick={() => handleDisconnect(client.client_id)}
                                     >
-                                        Revoke
+                                        Disconnect
                                     </button>
                                 </td>
                             </tr>

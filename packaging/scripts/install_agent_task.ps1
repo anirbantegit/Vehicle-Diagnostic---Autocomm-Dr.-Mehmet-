@@ -84,13 +84,14 @@ try {
     }
 
     $PowerShellExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
-    $ActionArgs = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$RunnerScript`""
+    $ActionArgs = "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$RunnerScript`""
     $Action = New-ScheduledTaskAction -Execute $PowerShellExe -Argument $ActionArgs -WorkingDirectory $InstallDir
     $Trigger = New-ScheduledTaskTrigger -AtLogOn -User $InteractiveUser
     $Principal = New-ScheduledTaskPrincipal -UserId $InteractiveUser -LogonType Interactive -RunLevel Limited
     $Settings = New-ScheduledTaskSettingsSet `
         -AllowStartIfOnBatteries `
         -DontStopIfGoingOnBatteries `
+        -Hidden `
         -MultipleInstances IgnoreNew `
         -RestartCount 3 `
         -RestartInterval (New-TimeSpan -Minutes 1)
@@ -103,7 +104,7 @@ try {
         -Settings $Settings `
         -Description "Starts Diagnostic Engine Console desktop agent in the signed-in desktop session for visible UI automation" `
         -Force | Out-Null
-    Write-TaskInstallLog "INFO" "Scheduled task registered; action=$PowerShellExe $ActionArgs"
+    Write-TaskInstallLog "INFO" "Scheduled task registered for the interactive desktop with hidden host UI; action=$PowerShellExe $ActionArgs"
 
     Start-ScheduledTask -TaskName $TaskName
     Write-TaskInstallLog "INFO" "Scheduled task start requested."
